@@ -1,0 +1,38 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "AirVault",
+    "version": "0.1.0",
+    "identifier": "app.airvault.desktop",
+    "build": {
+        "beforeDevCommand": "npm run dev",
+        "devUrl": "http://localhost:1420",
+        "beforeBuildCommand": "npm run build",
+        "frontendDist": "../dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "AirVault — Windows preview",
+                "width": 1280,
+                "height": 860,
+                "minWidth": 900,
+                "minHeight": 650
+            }
+        ],
+        "security": {
+            "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
+            "freezePrototype": true
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": ["nsis"],
+        "shortDescription": "Air-gapped signing vault and watch-only Bitcoin wallet",
+        "category": "Finance",
+        "windows": {
+            "webviewInstallMode": {
+                "type": "skip"
+            }
+        }
+    }
+}

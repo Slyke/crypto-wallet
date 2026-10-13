@@ -1,0 +1,30 @@
+[package]
+name = "airvault-core"
+version = "0.1.0"
+edition = "2021"
+[features]
+default = ["network"]
+network = ["dep:ureq", "dep:url"]
+[dependencies]
+aes-gcm = "0.10.3"
+argon2 = "0.5.3"
+base64 = "0.22"
+bip39 = { version = "2.2", features = ["zeroize"] }
+bitcoin = { version = "0.32", features = ["serde", "base64"] }
+hex = "0.4"
+rand = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = "2"
+uuid.workspace = true
+zeroize.workspace = true
+tempfile = "3"
+ureq = { version = "2.12", features = ["json"], optional = true }
+tw_bitcoin = { git = "https://github.com/trustwallet/wallet-core", rev = "d40d24a63d92619167903369308bf0e2f7eb3a59" }
+tw_coin_entry = { git = "https://github.com/trustwallet/wallet-core", rev = "d40d24a63d92619167903369308bf0e2f7eb3a59" }
+tw_keypair = { git = "https://github.com/trustwallet/wallet-core", rev = "d40d24a63d92619167903369308bf0e2f7eb3a59" }
+tw_hash = { git = "https://github.com/trustwallet/wallet-core", rev = "d40d24a63d92619167903369308bf0e2f7eb3a59" }
+tw_proto = { git = "https://github.com/trustwallet/wallet-core", rev = "d40d24a63d92619167903369308bf0e2f7eb3a59" }
+url = { version = "2", optional = true }
