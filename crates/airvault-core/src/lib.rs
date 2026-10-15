@@ -11,3 +11,13 @@ pub mod session;
 pub mod storage;
 pub mod wallet;
 pub use error::{Error, Result};
+
+pub mod chains;
+
+#[cfg(feature = "network")]
+pub mod providers;
+
+pub mod integrity;
+
+pub mod multisig;
+pub mod multisig_psbt;

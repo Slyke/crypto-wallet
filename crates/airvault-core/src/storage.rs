@@ -117,8 +117,8 @@ fn derive(password: &str, wrap: &PasswordWrap) -> Result<Zeroizing<Vec<u8>>> {
     Ok(key)
 }
 fn password_wrap(password: &str, key: &[u8], aad: &[u8]) -> Result<PasswordWrap> {
-    if password.len() < 12 || password.len() > 1024 {
-        return Err(Error::Invalid("use a password of at least 12 characters"));
+    if password.chars().count() < 6 || password.len() > 1024 {
+        return Err(Error::Invalid("use a password of at least 6 characters"));
     }
     let mut wrap = PasswordWrap {
         salt: random(16)?.to_vec(),
@@ -287,7 +287,11 @@ impl OpenVault {
             &bytes,
             aad(self.file.id, "metadata").as_bytes(),
         )?;
-        Ok(serde_json::to_vec(&self.file)?)
+        let encoded = serde_json::to_vec(&self.file)?;
+        if encoded.len() as u64 > MAX_VAULT_BYTES {
+            return Err(Error::Invalid("vault capacity reached"));
+        }
+        Ok(encoded)
     }
     pub fn save(&mut self, path: &Path) -> Result<()> {
         atomic_write(path, &self.encrypted_bytes()?)

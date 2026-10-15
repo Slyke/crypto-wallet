@@ -2,13 +2,13 @@
 
 ## Basic manual test
 
-1. Extract the entire portable ZIP. Keep **WebView2Loader.dll beside both executables**. Copying only an EXE is insufficient for this Windows GNU build. Alternatively, use the installer, which includes the loader.
-2. Start AirVault with a disposable profile. Choose Offline, create a vault and open Wallets & identities.
+1. Extract the entire portable ZIP. Keep **WebView2Loader.dll beside AirVault.exe**. Copying only an EXE is insufficient for this Windows GNU build. Alternatively, use the installer, which includes the loader.
+2. Start AirVault with a disposable profile. Create a vault (Offline is the default) and open Create or import.
 3. Name the wallet. The default is 24 words with 11 manually generated prefix words and 135 OS-generated bits. For a short UI test, set the prefix count to 1. Use actual fair rolls for any real entropy; deterministic test values are only for testing.
 4. Enter eleven die values. Check immediate bits, undo/reset, the resulting word, expandable plain-text calculation, printed position and verification checkbox.
 5. Generate the phrase. Record it privately, hide it, re-enter it, and confirm. The complete phrase and its dice history should no longer appear.
 6. Derive a BIP84 Testnet4 account. Test startup locking and recovery verification. Never fund the published all-abandon test vector.
-7. In Appearance, try Terminal, Paper and Ocean, dark/light modes and fonts. Close/reopen to check preference persistence.
+7. In Appearance, try Terminal, Paper and Ocean, dark/light modes, fonts, scale and Ctrl+/Ctrl−/Ctrl0 shortcuts. Close/reopen to check preference persistence.
 8. Create an encrypted backup and use a new profile to check and then restore it. Confirm the derived address is unchanged.
 9. Use the Bitcoin Core regtest integration below for repeatable funded signing. The live Testnet4 probe only checks provider/network/address interoperability unless the disposable address is funded.
 
@@ -24,7 +24,7 @@ Prepare a request using UTXOs including full previous transaction hex. Export `.
 npm ci
 npm run check
 npm test
-cargo test -p airvault-core
+cargo test -p airvault-core --release
 cargo test -p airvault-core --no-default-features
 npm run test:ui
 npm run build
@@ -33,7 +33,7 @@ npm run check:production
 
 `npm run test:ui` builds a separate Rust example and starts a loopback Vite test server. The test entry mocks only the Tauri transport: actual create/unlock, encryption, generation, confirmation, account derivation, review and signing call the real core. Test profiles use temporary directories. The bridge never ships. Browser traces/screenshots are disabled by default to avoid retaining generated phrases.
 
-The UI cases cover theme/mode persistence and offline help, dice undo/reset and prefix preservation, full 128-roll generation/checksum, clearing worksheets, and real signing with an invalid password followed by explicit valid approval. Unit cases check all 2,048 dice indices and the official wordlist hash. Rust checks independently reconstruct entropy/checksum bits with SHA-256, outside the BIP39 parser.
+The eight UI cases cover compact setup, advisory password grading, confirmation matching, scale shortcuts, all blockchain account selectors, ERC-20 registration/signing, theme/mode persistence and offline help, dice undo/reset and prefix preservation, full 128-roll generation/checksum, clearing worksheets, and real signing with an invalid password followed by explicit valid approval. Unit cases check all 2,048 dice indices and the official wordlist hash. Rust checks independently reconstruct entropy/checksum bits with SHA-256, outside the BIP39 parser.
 
 Core integration checks cover encrypted storage, password rotation, custom-password isolation, tampering, BIP44/49/84/86 vectors, Unicode passphrases, malicious PSBTs, request/response binding, signature verification, single-use approvals and backup restoration. The Windows test executables can be cross-built and run directly on Windows:
 
@@ -58,10 +58,20 @@ The separate `cargo run -p airvault-core --example testnet_probe` creates `.loca
 
 The maintained cross-build entry is `bash scripts/build-windows.sh`. Prerequisites are Rust's `x86_64-pc-windows-gnu` target, MinGW GCC, Node 24 and NSIS. The local build cache uses NSIS under `.tools/nsis/root/usr`; the wrapper restores NSISDIR because Tauri clears that variable. NSIS 3.08 needed the upstream `Include/Win/RestartManager.nsh` file for the current Tauri template. A current NSIS release is preferable.
 
-The build produces the normal application, NSIS installer, network-free executable, loader DLL, portable ZIP and hashes. Tauri automatically adds the GNU WebView2 loader to the installer. The portable packager explicitly copies and requires it. WebView2 Runtime itself must already be installed; no runtime download is triggered.
+The build produces the single application, NSIS installer, loader DLL, portable ZIP and hashes. Tauri automatically adds the GNU WebView2 loader to the installer. The portable packager explicitly copies and requires it. WebView2 Runtime itself must already be installed; no runtime download is triggered.
 
 For native Windows MSVC builds, install Rust, Visual Studio C++ tools, Node and Tauri's Windows prerequisites, then use `npm run tauri -- build`. This host was validated using the cross-built GNU binaries; native MSVC build qualification remains separate.
 
 ## Known test limits
 
 Native Windows launch and vault creation are checked via the computer-use MCP tool. Core test binaries run on Windows. Real sleep/resume, focus-loss behavior with native file dialogs, installer upgrade/uninstall, and a funded public Testnet4 broadcast still need dedicated manual coverage. Linux desktop packaging/VM UI testing remains pending.
+
+## Recovery and help regressions
+
+Use public all-abandon fixtures for clipboard and error-path testing. Verify numbered one-word-per-line copying requires confirmation; Cancel leaves the clipboard untouched. Test malformed checksum, numbered words on a single line, full words, four-letter prefixes and newline entry. Errors must retain the entry and allow retry without consuming a creation ceremony. Confirm that successful verification, navigation, expiry and locking clear the relevant secret state.
+
+Verify the three wallet pages are separate, all page titles have help, field help stays beside its label, help dialogs close on backdrop/Escape, and Learn more selects the correct Instructions topic. Account deletion must require confirmation, persist across lock/unlock, leave the wallet and identities intact, and allow rederiving the same address.
+
+## Bitcoin multisig checks
+
+Run `cargo test -p airvault-core --release --test multisig` for independent-signer and recovery cases. Run `BITCOIND=/absolute/path/to/verified/bitcoind cargo test -p airvault-core --release --test regtest multisig -- --ignored --nocapture` for Bitcoin Core descriptor/PSBT interoperability and confirmed 2-of-3 spending. The node disables external peers. The native bridge browser flow is `npm run test:ui -- multisig.spec.ts`. Windows cross-compiled multisig test executables require writable disposable temporary directories.

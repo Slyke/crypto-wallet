@@ -4,14 +4,14 @@
 
 `src/` contains the Svelte UI. `src-tauri/` owns narrow IPC commands, native file paths, profile exclusivity and Windows power-event notifications. `crates/airvault-core/` holds encrypted storage, identities, entropy, native transaction handling, approval sessions and explicit network adapters.
 
-The native command layer serializes mutations with one session mutex. No generic shell/SQL/executable dispatch exists. Browser content security policy restricts connections to Tauri IPC. No third-party scripts, web fonts, analytics or network logger are loaded.
+The native command layer serializes mutations with one session mutex. Network calls copy only approved public data and run outside the mutex, allowing timeout/suspend locking while a provider is pending. Completed broadcast receipts are queued in memory when locked and added to encrypted history on unlock. No generic shell/SQL/executable dispatch exists. Browser content security policy restricts connections to Tauri IPC. No third-party scripts, web fonts, analytics or network logger are loaded.
 
 ## File protocol
 
 Version 1 uses strict camelCase JSON envelopes with unknown-field rejection.
 
-- `.avpub`: public accounts with network, address, public key, path, label and fingerprint. No local identity reference. Imported addresses must match their public keys and derivation purpose.
-- `.avreq`: unique request ID, operation, explicit network, base64 PSBT, SHA-256 payload checksum and untrusted description.
+- `.avpub`: public accounts with network, address, public key, path, label, fingerprint and token records. No local identity reference. Imported addresses must match their public keys and derivation purpose.
+- `.avreq`: unique request ID, operation, explicit network, base64 PSBT or typed native transaction, SHA-256 payload checksum and untrusted description.
 - `.avsig`: original request ID and full-envelope digest, network, base64 signed transaction, its checksum and txid.
 - `.avvault`: versioned password-wrapped master key and encrypted authenticated metadata/records.
 
@@ -27,6 +27,12 @@ Dice-to-word conversion is integer arithmetic against the official bundled Engli
 
 ## Styleguide adaptations
 
-Terminal, Paper and Ocean surface/radius tokens come from `../styleguide/design.md`; D4rk remains the default. Root `data-palette`, `data-theme` and `data-font` drive the UI. Only these non-secret preferences are stored in browser localStorage using the guide's key names. Monospace is used throughout, as appropriate for the initial wallet interface. Semantic start/mid/warning/danger meanings remain intact.
+Terminal, Paper and Ocean surface/radius tokens come from `../styleguide/design.md`; D4rk remains the default. Root `data-palette`, `data-theme` and `data-font` drive the UI. Only these non-secret preferences and interface scale are stored in browser localStorage using the guide's key names. Monospace is used throughout, as appropriate for the initial wallet interface. Semantic start/mid/warning/danger meanings remain intact.
 
 The guide's server/Docker probes and HTTP MCP preference are not applicable to this native offline-first product. The full generic logging infrastructure was intentionally not copied because it adds unneeded network sinks. Startup records only build/version identifiers; operation parameters, entropy, keys, phrases and passphrases are never logged. The product specification takes precedence for local stdio MCP, when implemented.
+
+## Bitcoin multisig
+
+Optional account policies preserve backward-compatible single-key public-bundle serialization. They contain a BIP48 cosigner set, threshold and explicit branch/index. A local account references one proven identity; watch-only export clears the identity. .avmulti backups include public configuration and checksummed receive/change descriptors. PSBT v0 .psbt files carry unfinalized signing rounds.
+
+The original request remains immutable. Encrypted vault progress stores the combined PSBT separately. Imports match unsigned transaction bytes and selected network, validate all partial signatures and registered scripts, and merge only verified signatures. An import invalidates outstanding approvals. Once every input reaches its threshold, finalization creates a normal .avsig response bound to the local original request; broadcast still independently verifies its final witnesses. New requests and failed rounds use the existing transactional mutation/rollback boundary.

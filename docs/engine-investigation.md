@@ -1,24 +1,30 @@
-# Signing engine decision
+# Signing engines
 
-Pinned source: Trust Wallet Core **4.8.4**, commit `d40d24a63d92619167903369308bf0e2f7eb3a59`.
+Trust Wallet Core 4.8.4 is pinned to commit `d40d24a63d92619167903369308bf0e2f7eb3a59`. Its upstream C++ build does not officially support Windows, so AirVault uses its native Rust chain modules.
 
-Inspected upstream TWHDWallet.h, TWAnySigner.h, registry.json, BitcoinV2.proto, Bitcoin's Rust entry.rs, modules/signer.rs, modules/psbt_request, and Polkadot's Rust entry.rs before writing adapters.
+| Family | Signing engine | Verification |
+| --- | --- | --- |
+| BTC/LTC/DOGE | Wallet Core BitcoinEntry | rust-bitcoin consensus, scripts and libsecp256k1 |
+| BCH | Wallet Core BitcoinCashEntry | reconstructed fork-ID digest and libsecp256k1 |
+| EVM | Wallet Core EthereumEntry | canonical RLP, EIP-155 chain binding, Keccak and libsecp256k1 recovery |
+| Solana | Wallet Core SolanaEntry | exact legacy message reconstruction and ed25519-dalek |
+| Cosmos | Wallet Core CosmosEntry | independent SignDoc/TxRaw protobuf encoding and libsecp256k1 |
+| XRP | Wallet Core RippleEntry | exact native field serialization, SHA-512Half and DER signature verification |
+| Tron | Wallet Core secp256k1 signer | native protobuf reconstruction, SHA-256 and libsecp256k1 recovery |
+| Cardano | cardano-serialization-lib 15 | exact body/witness checks, Blake2b256 and ed25519-dalek |
+| Polkadot Hub | schnorrkel sr25519 | Substrate signing context, runtime call/extension types, RFC78 metadata digest |
 
-The official C++ desktop build does not officially support Windows. This build uses the upstream native Rust Bitcoin implementation directly, pinned by commit. BitcoinEntry::sign invokes the same BitcoinV2 signer behind AnySigner. This is an internal upstream API; the adapter isolates it and the commit must only change with vector and interoperability testing.
+BIP39, rust-bitcoin BIP32, SLIP-10 HMAC, substrate-bip39 and Cardano Icarus provide the family-specific derivations. All default address families are compared against independently generated bip_utils 2.12.2 public vectors. Cardano and common Substrate sr25519 derivation require their respective native libraries; no incompatible Wallet Core ed25519 fallback is used for Polkadot.
 
-Wallet Core's native Rust crates do not expose the C++ HDWallet mnemonic/HD derivation interface. The bip39 crate supplies standard mnemonic validation, NFKD passphrase normalization and seed generation. rust-bitcoin supplies BIP32, address encodings, PSBT construction/decoding and independent libsecp256k1 verification. Signing remains in Wallet Core (which uses k256 for ECDSA). No alternate multi-chain SDK is included. This avoids the outdated community Windows C++ fork. These additions require dependency review before a production release.
+Runtime metadata is decoded and validated before constructing a Polkadot call. Unknown signed extensions fail closed. CheckMetadataHash is enabled and its digest is signed. Native operations are typed; arbitrary calldata, arbitrary Solana messages and arbitrary executable calls do not enter a generic signing endpoint.
 
-Upstream support does not imply AirVault support. Initial capability assessment:
+References:
 
-| Network | Upstream evidence | AirVault integration target |
-|---|---|---|
-| Bitcoin | BitcoinV2 PSBT and transaction builder | Native SegWit single-key inputs first; independently verify every input |
-| Ethereum / BSC / Polygon / Avalanche C / Arbitrum / Optimism / Base | Ethereum protobuf and Rust entry | Disabled until typed decoding and verification tests exist |
-| SHIB / ERC-20 | Ethereum transfer operation | Disabled with EVM adapter |
-| Dogecoin / Litecoin / BCH | UTXO registry and chain-specific entries | Disabled until chain-specific vectors exist |
-| Solana / SPL | Solana protobuf and Rust entry | Disabled until instruction decoding and recovery vectors exist |
-| Polkadot | ed25519 in inspected entry; not sr25519 | Disabled; do not produce incompatible common-wallet accounts |
-| Cardano / Cosmos / XRP / Tron | Registry entries; chain-specific definitions | Disabled until verified integration |
-| NFTs / staking / typed messages | Operation-specific support varies | No blind signing fallback |
+- [Wallet Core source](https://github.com/trustwallet/wallet-core/tree/4.8.4)
+- [Wallet Core platform FAQ](https://developer.trustwallet.com/developer/wallet-core/faq)
+- [Cardano serialization library](https://github.com/Emurgo/cardano-serialization-lib)
+- [Substrate metadata RFC78](https://polkadot-fellows.github.io/RFCs/approved/0078-merkleized-metadata.html)
+- [Blockbook API](https://github.com/trezor/blockbook/blob/master/openapi.yaml)
+- [Tron constant contract queries](https://developers.tron.network/reference/triggerconstantcontract)
 
-Sources: https://github.com/trustwallet/wallet-core/tree/4.8.4 and https://developer.trustwallet.com/developer/wallet-core/faq.
+Pinned internal Wallet Core APIs are isolated behind adapters and must be revalidated when dependencies change.

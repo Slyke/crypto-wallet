@@ -7,7 +7,7 @@ use crate::{
 use serde::Deserialize;
 use std::{io::Read, time::Duration};
 
-fn endpoint(mode: Mode, base: &str, path: &str) -> Result<String> {
+pub(crate) fn endpoint(mode: Mode, base: &str, path: &str) -> Result<String> {
     if !mode.can_network() {
         return Err(Error::Mode);
     }
@@ -23,13 +23,13 @@ fn endpoint(mode: Mode, base: &str, path: &str) -> Result<String> {
     }
     Ok(format!("{}/{}", base.trim_end_matches('/'), path))
 }
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(Duration::from_secs(20))
         .build()
 }
-fn body(response: ureq::Response) -> Result<Vec<u8>> {
+pub(crate) fn body(response: ureq::Response) -> Result<Vec<u8>> {
     let mut bytes = vec![];
     response
         .into_reader()
@@ -41,11 +41,14 @@ fn body(response: ureq::Response) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn get(mode: Mode, base: &str, path: &str) -> Result<Vec<u8>> {
+pub(crate) fn get(mode: Mode, base: &str, path: &str) -> Result<Vec<u8>> {
     let url = endpoint(mode, base, path)?;
     body(agent().get(&url).call().map_err(|_| Error::Network)?)
 }
 pub fn verify_chain(mode: Mode, base: &str, network: Network) -> Result<()> {
+    if !network.is_bitcoin() {
+        return Err(Error::Invalid("Bitcoin provider network"));
+    }
     let hash = String::from_utf8(get(mode, base, "block-height/0")?).map_err(|_| Error::Network)?;
     let expected = ::bitcoin::blockdata::constants::genesis_block(network.native())
         .block_hash()

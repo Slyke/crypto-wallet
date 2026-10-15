@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-const forbidden = ['__AIRVAULT_TEST_BRIDGE__', '__airvault_test', 'test_fund', 'test_seed', 'mockIPC', 'ui_test_bridge'];
+const forbidden = ['__AIRVAULT_TEST_BRIDGE__', '__airvault_test', 'test_fund', 'test_seed', 'test_multisig_seed', 'test_saved_multisig', 'test_saved_psbt', 'mockIPC', 'ui_test_bridge'];
 const walk = async ({ directory }) => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
         const path = join(directory, entry.name);

@@ -12,6 +12,15 @@ The application uses open-source components under their respective licenses. Thi
   SHA-256 of bundled UTF-8 file: 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda.
 - Microsoft WebView2Loader.dll: Microsoft WebView2 SDK redistributable, supplied by the locked webview2-com-sys dependency. Microsoft SDK terms apply: https://www.nuget.org/packages/Microsoft.Web.WebView2
   The bundled x64 loader has a valid Microsoft Corporation Authenticode signature.
+- Cardano serialization library: MIT, https://github.com/Emurgo/cardano-serialization-lib
+- schnorrkel / sr25519: BSD-3-Clause, https://github.com/w3f/schnorrkel
+- ed25519-dalek and curve25519-dalek: BSD-3-Clause, https://github.com/dalek-cryptography/curve25519-dalek
+- Substrate BIP39, SCALE and runtime metadata libraries: consult locked package license declarations, https://github.com/paritytech
+- zxcvbn-ts core and bundled language dictionaries: MIT, https://github.com/zxcvbn-ts/zxcvbn
 - Terminal, Paper and Ocean design tokens: copied from the user's adjacent styleguide repository.
 
 Cargo.lock and package-lock.json identify the complete resolved dependency graph. A complete machine-generated license inventory and final redistribution review remain release tasks.
+
+## Bitcoin whitepaper
+
+The original English PDF, *Bitcoin: A Peer-to-Peer Electronic Cash System* by Satoshi Nakamoto (2008), is included unchanged for offline reference. Source: https://bitcoin.org/bitcoin.pdf (retrieved 2026-10-15). The bundled file and attribution are in public/reference; the portable package includes them in docs/reference. This historical document is not an audit or endorsement of AirVault.

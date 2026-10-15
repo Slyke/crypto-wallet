@@ -159,19 +159,41 @@ fn derive_account(
     network: Network,
     path: String,
     key_password: Option<String>,
+    token: Option<model::Token>,
 ) -> Result<Uuid> {
     let password = key_password.map(Zeroizing::new);
     with(&state, |s| {
         s.mutate(|v| {
-            v.derive_account(
+            if let Some(token) = &token {
+                token.validate(network)?;
+            }
+            let id = v.derive_account(
                 identity_id,
                 &label,
                 network,
                 &path,
                 password.as_ref().map(|p| p.as_str()),
-            )
+            )?;
+            if let Some(token) = token {
+                v.data
+                    .accounts
+                    .iter_mut()
+                    .find(|a| a.id == id)
+                    .ok_or(Error::NotFound)?
+                    .tokens
+                    .push(token);
+            }
+            Ok(id)
         })
     })
+}
+#[tauri::command]
+fn delete_account(state: State<AppState>, account_id: Uuid, confirmed: bool) -> Result<()> {
+    with(&state, |s| s.delete_account(account_id, confirmed))
+}
+#[tauri::command]
+fn add_account_token(state: State<AppState>, account_id: Uuid, token: model::Token) -> Result<()> {
+    with(&state, |s| s.mutate(|v| v.add_token(account_id, token)))
 }
 #[tauri::command]
 fn verify_recovery(
@@ -341,103 +363,170 @@ fn prepare_transfer(
 }
 #[cfg(feature = "network")]
 #[tauri::command]
-fn fetch_utxos(state: State<AppState>, account_id: Uuid) -> Result<Vec<Utxo>> {
-    with(&state, |s| {
-        let v = s.vault()?;
-        let a = v
-            .data
-            .accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .ok_or(Error::NotFound)?;
-        airvault_core::network::utxos(
-            v.data.settings.mode,
-            &v.data.settings.rpc_url,
-            &a.address,
-            a.network,
-        )
-    })
-}
-#[cfg(feature = "network")]
-#[tauri::command]
-fn address_summary(state: State<AppState>, account_id: Uuid) -> Result<serde_json::Value> {
-    with(&state, |s| {
-        let v = s.vault()?;
-        let a = v
-            .data
-            .accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .ok_or(Error::NotFound)?;
-        airvault_core::network::address_summary(
-            v.data.settings.mode,
-            &v.data.settings.rpc_url,
-            &a.address,
-            a.network,
-        )
-    })
-}
-#[cfg(feature = "network")]
-#[tauri::command]
-fn broadcast_response(
+fn prepare_chain_transfer(
     state: State<AppState>,
+    account_id: Uuid,
+    operation: airvault_core::chains::transactions::Operation,
+) -> Result<Uuid> {
+    with(&state, |s| {
+        let vault = s.vault()?;
+        if !vault.data.settings.mode.can_network() {
+            return Err(Error::Mode);
+        }
+        let account = vault
+            .data
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .ok_or(Error::NotFound)?;
+        let transaction = airvault_core::chains::transactions::Transaction {
+            sender: account.address.clone(),
+            public_key: account.public_key.clone(),
+            operation,
+        };
+        let request = airvault_core::chains::transactions::request(account.network, transaction)?;
+        s.import_request(&serde_json::to_vec(&request)?)
+    })
+}
+#[cfg(feature = "network")]
+fn public_context(state: &State<AppState>, account_id: Uuid) -> Result<(Settings, model::Account)> {
+    with(state, |s| {
+        let vault = s.vault()?;
+        if !vault.data.settings.mode.can_network() {
+            return Err(Error::Mode);
+        }
+        Ok((
+            vault.data.settings.clone(),
+            vault
+                .data
+                .accounts
+                .iter()
+                .find(|a| a.id == account_id)
+                .ok_or(Error::NotFound)?
+                .clone(),
+        ))
+    })
+}
+#[cfg(feature = "network")]
+#[tauri::command]
+async fn fetch_utxos(state: State<'_, AppState>, account_id: Uuid) -> Result<Vec<Utxo>> {
+    let (settings, account) = public_context(&state, account_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        airvault_core::network::utxos(
+            settings.mode,
+            &settings.provider(account.network),
+            &account.address,
+            account.network,
+        )
+    })
+    .await
+    .map_err(|_| Error::Network)?
+}
+#[cfg(feature = "network")]
+#[tauri::command]
+async fn fetch_chain_state(
+    state: State<'_, AppState>,
+    account_id: Uuid,
+) -> Result<serde_json::Value> {
+    let (settings, account) = public_context(&state, account_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        airvault_core::providers::fetch_state(&settings, &account)
+    })
+    .await
+    .map_err(|_| Error::Network)?
+}
+#[cfg(feature = "network")]
+#[tauri::command]
+async fn address_summary(
+    state: State<'_, AppState>,
+    account_id: Uuid,
+) -> Result<serde_json::Value> {
+    let (settings, account) = public_context(&state, account_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        airvault_core::providers::balance(&settings, &account)
+    })
+    .await
+    .map_err(|_| Error::Network)?
+}
+#[cfg(feature = "network")]
+#[tauri::command]
+async fn broadcast_response(
+    state: State<'_, AppState>,
     id: Uuid,
     password: String,
     confirmed: bool,
 ) -> Result<String> {
     let password = Zeroizing::new(password);
-    with(&state, |s| {
+    let (settings, response, digest) = with(&state, |s| {
         if !confirmed {
             return Err(Error::Approval);
         }
-        let v = s.vault()?;
-        v.authenticate(&password)?;
-        if !v.data.settings.mode.can_network() {
+        let vault = s.vault()?;
+        vault.authenticate(&password)?;
+        if !vault.data.settings.mode.can_network() {
             return Err(Error::Mode);
         }
-        let r = v
+        let request = vault
             .data
             .pending
             .iter()
             .find(|r| r.request_id == id)
             .ok_or(Error::NotFound)?;
-        let response = v
+        let response = vault
             .data
             .responses
             .iter()
             .find(|r| r.request_id == id)
             .ok_or(Error::NotFound)?;
-        bitcoin::verify(r, response, &v.data.accounts)?;
-        let txid = airvault_core::network::broadcast(
-            v.data.settings.mode,
-            &v.data.settings.rpc_url,
-            &response.payload.decode()?,
-            response.network,
-        )?;
-        if txid != response.txid {
-            return Err(Error::Verification);
-        }
-        s.mutate(|v| {
-            v.data.history.push(model::History {
-                id: Uuid::new_v4(),
-                request_id: id,
-                action: "broadcast".into(),
-                at: model::now(),
-                digest: r_digest(v, id)?,
-                txid: Some(txid.clone()),
-            });
-            Ok(txid)
-        })
+        airvault_core::chains::transactions::verify(request, response, &vault.data.accounts)?;
+        Ok((
+            vault.data.settings.clone(),
+            response.clone(),
+            request.binding()?,
+        ))
+    })?;
+    drop(password);
+    let txid = tauri::async_runtime::spawn_blocking(move || {
+        airvault_core::providers::broadcast(&settings, &response)
     })
+    .await
+    .map_err(|_| Error::Network)??;
+    with(&state, |s| {
+        s.record_broadcast(model::History {
+            id: Uuid::new_v4(),
+            request_id: id,
+            action: "broadcast".into(),
+            at: model::now(),
+            digest,
+            txid: Some(txid.clone()),
+        });
+        Ok(())
+    })?;
+    Ok(txid)
 }
-#[cfg(feature = "network")]
-fn r_digest(v: &storage::OpenVault, id: Uuid) -> Result<String> {
-    v.data
-        .pending
-        .iter()
-        .find(|r| r.request_id == id)
-        .ok_or(Error::NotFound)?
-        .binding()
+#[tauri::command]
+async fn app_info() -> Result<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let binary = airvault_core::integrity::current_binary()?;
+        Ok(serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "buildHash": env!("AIRVAULT_BUILD_HASH"),
+            "sourceHash": env!("AIRVAULT_SOURCE_HASH"),
+            "builtAt": env!("AIRVAULT_BUILT_AT"),
+            "target": env!("AIRVAULT_BUILD_TARGET"),
+            "dirty": env!("AIRVAULT_DIRTY") == "true",
+            "binaryPath": binary.path,
+            "binarySha256": binary.sha256,
+        }))
+    })
+    .await
+    .map_err(|_| Error::Invalid("Could not read application identity"))?
+}
+#[tauri::command]
+fn save_whitepaper(path: PathBuf) -> Result<()> {
+    // A bundled public document only: this command never reads vault records.
+    let document = include_bytes!("../../public/reference/bitcoin-whitepaper.pdf");
+    storage::atomic_write(&path, document)
 }
 #[tauri::command]
 fn capabilities() -> Vec<airvault_core::capabilities::Capability> {
@@ -460,7 +549,7 @@ fn main() {
         let timer = Arc::clone(&session);
         std::thread::spawn(move || loop { std::thread::sleep(Duration::from_secs(2)); if let Ok(mut s) = timer.lock() { #[cfg(windows)] if power::take_lock_request() { s.lock(); } s.tick(); } });
         app.manage(AppState { session, _lock: lock });
-        eprintln!("{}", serde_json::json!({"level":"info","loggerKey":"AIRVAULT_STARTUP","version":env!("CARGO_PKG_VERSION"),"buildHash":env!("AIRVAULT_BUILD_HASH")}));
+        eprintln!("{}", serde_json::json!({"level":"info","loggerKey":"AIRVAULT_STARTUP","version":env!("CARGO_PKG_VERSION"),"buildHash":env!("AIRVAULT_BUILD_HASH"),"sourceHash":env!("AIRVAULT_SOURCE_HASH"),"target":env!("AIRVAULT_BUILD_TARGET")}));
         Ok(())
     }).on_window_event(|window, event| {
         if let tauri::WindowEvent::Focused(false) = event {
@@ -470,6 +559,8 @@ fn main() {
     #[cfg(feature = "network")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         snapshot,
+        app_info,
+        save_whitepaper,
         create_vault,
         unlock_vault,
         lock_vault,
@@ -481,6 +572,16 @@ fn main() {
         import_wif,
         add_identity,
         derive_account,
+        multisig_cosigner,
+        preview_multisig,
+        register_multisig,
+        read_multisig,
+        export_multisig,
+        import_psbt,
+        export_psbt,
+        approve_multisig,
+        add_account_token,
+        delete_account,
         verify_recovery,
         change_password,
         save_settings,
@@ -493,7 +594,9 @@ fn main() {
         review_request,
         approve_signing,
         prepare_transfer,
+        prepare_chain_transfer,
         fetch_utxos,
+        fetch_chain_state,
         address_summary,
         broadcast_response,
         capabilities
@@ -501,6 +604,8 @@ fn main() {
     #[cfg(not(feature = "network"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         snapshot,
+        app_info,
+        save_whitepaper,
         create_vault,
         unlock_vault,
         lock_vault,
@@ -512,6 +617,16 @@ fn main() {
         import_wif,
         add_identity,
         derive_account,
+        multisig_cosigner,
+        preview_multisig,
+        register_multisig,
+        read_multisig,
+        export_multisig,
+        import_psbt,
+        export_psbt,
+        approve_multisig,
+        add_account_token,
+        delete_account,
         verify_recovery,
         change_password,
         save_settings,
@@ -528,4 +643,131 @@ fn main() {
     builder
         .run(tauri::generate_context!())
         .expect("AirVault could not start");
+}
+
+#[tauri::command]
+fn multisig_cosigner(
+    state: State<AppState>,
+    identity_id: Uuid,
+    network: Network,
+    account: u32,
+    key_password: Option<String>,
+) -> Result<String> {
+    let password = key_password.map(Zeroizing::new);
+    with(&state, |s| {
+        Ok(s.vault()?
+            .multisig_cosigner(
+                identity_id,
+                network,
+                account,
+                password.as_ref().map(|p| p.as_str()),
+            )?
+            .text())
+    })
+}
+#[tauri::command]
+fn preview_multisig(
+    label: String,
+    network: Network,
+    threshold: u8,
+    cosigners: String,
+    branch: u32,
+    index: u32,
+) -> Result<airvault_core::multisig::Backup> {
+    if cosigners.len() > 4096 {
+        return Err(Error::Invalid("cosigner list size"));
+    }
+    let policy = airvault_core::multisig::Policy {
+        threshold,
+        branch,
+        index,
+        cosigners: cosigners
+            .lines()
+            .filter(|s| !s.trim().is_empty())
+            .map(airvault_core::multisig::Cosigner::parse)
+            .collect::<Result<Vec<_>>>()?,
+    };
+    airvault_core::multisig::Backup::new(&label, network, policy)
+}
+#[tauri::command]
+fn register_multisig(
+    state: State<AppState>,
+    backup: airvault_core::multisig::Backup,
+    identity_id: Option<Uuid>,
+    key_password: Option<String>,
+    confirmed: bool,
+) -> Result<Uuid> {
+    if !confirmed {
+        return Err(Error::Approval);
+    }
+    let backup = airvault_core::multisig::Backup::parse(&serde_json::to_vec(&backup)?)?;
+    let password = key_password.map(Zeroizing::new);
+    with(&state, |s| {
+        s.mutate(|v| {
+            v.register_multisig(
+                &backup.label,
+                backup.network,
+                backup.policy,
+                identity_id,
+                password.as_ref().map(|p| p.as_str()),
+            )
+        })
+    })
+}
+#[tauri::command]
+fn read_multisig(path: PathBuf) -> Result<airvault_core::multisig::Backup> {
+    extension(&path, "avmulti")?;
+    airvault_core::multisig::Backup::parse(&storage::read_bounded(&path, 32768)?)
+}
+#[tauri::command]
+fn export_multisig(state: State<AppState>, id: Uuid, path: PathBuf) -> Result<()> {
+    extension(&path, "avmulti")?;
+    with(&state, |s| {
+        let account = s
+            .vault()?
+            .data
+            .accounts
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or(Error::NotFound)?;
+        let backup = airvault_core::multisig::Backup::new(
+            &account.label,
+            account.network,
+            account.multisig.clone().ok_or(Error::NotFound)?,
+        )?;
+        storage::atomic_write(&path, &serde_json::to_vec_pretty(&backup)?)
+    })
+}
+#[tauri::command]
+fn import_psbt(state: State<AppState>, path: PathBuf, network: Network) -> Result<Uuid> {
+    extension(&path, "psbt")?;
+    with(&state, |s| {
+        s.import_psbt(
+            &storage::read_bounded(&path, protocol::MAX_EXCHANGE_BYTES as u64)?,
+            network,
+        )
+    })
+}
+#[tauri::command]
+fn export_psbt(state: State<AppState>, path: PathBuf, id: Uuid) -> Result<()> {
+    extension(&path, "psbt")?;
+    with(&state, |s| storage::atomic_write(&path, &s.psbt_bytes(id)?))
+}
+#[tauri::command]
+fn approve_multisig(
+    state: State<AppState>,
+    token: Uuid,
+    confirmed: bool,
+    password: String,
+    key_passwords: HashMap<Uuid, String>,
+    selected_accounts: Vec<Uuid>,
+) -> Result<Uuid> {
+    let password = Zeroizing::new(password);
+    let keys = key_passwords
+        .into_iter()
+        .map(|(id, value)| (id, Zeroizing::new(value)))
+        .collect();
+    with(&state, |s| {
+        s.sign_multisig(token, confirmed, &password, &keys, &selected_accounts)
+    })
 }

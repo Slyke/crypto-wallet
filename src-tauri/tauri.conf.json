@@ -12,9 +12,9 @@
     "app": {
         "windows": [
             {
-                "title": "AirVault — Windows preview",
+                "title": "AirVault",
                 "width": 1280,
-                "height": 860,
+                "height": 940,
                 "minWidth": 900,
                 "minHeight": 650
             }
@@ -26,8 +26,10 @@
     },
     "bundle": {
         "active": true,
-        "targets": ["nsis"],
-        "shortDescription": "Air-gapped signing vault and watch-only Bitcoin wallet",
+        "targets": [
+            "nsis"
+        ],
+        "shortDescription": "Multi-chain wallet and offline signing vault",
         "category": "Finance",
         "windows": {
             "webviewInstallMode": {

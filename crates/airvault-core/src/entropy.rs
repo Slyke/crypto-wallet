@@ -50,7 +50,8 @@ pub fn validate(phrase: &str) -> Result<Zeroizing<String>> {
     if phrase.len() > 1024 {
         return Err(Error::Invalid("phrase too long"));
     }
-    let mnemonic = Mnemonic::parse_in(Language::English, phrase)
+    let words = input_words(phrase)?;
+    let mnemonic = Mnemonic::parse_in(Language::English, &*words)
         .map_err(|_| Error::Invalid("BIP39 words or checksum are invalid"))?;
     if !matches!(mnemonic.word_count(), 12 | 24) {
         return Err(Error::Unsupported(
@@ -58,6 +59,59 @@ pub fn validate(phrase: &str) -> Result<Zeroizing<String>> {
         ));
     }
     Ok(Zeroizing::new(mnemonic.to_string()))
+}
+
+/// Normalize human-entered English words without guessing typos or reordering them.
+fn input_words(phrase: &str) -> Result<Zeroizing<String>> {
+    let numbered = phrase.chars().any(|c| c.is_ascii_digit());
+    let mut result = Zeroizing::new(String::new());
+    let list = Language::English.word_list();
+    let mut push_word = |word: &str| -> Result<()> {
+        let lower = Zeroizing::new(word.to_ascii_lowercase());
+        let full = if list.contains(&lower.as_str()) {
+            lower.as_str()
+        } else if lower.len() == 4 && lower.bytes().all(|c| c.is_ascii_lowercase()) {
+            let mut matches = list.iter().filter(|word| word.starts_with(lower.as_str()));
+            let first = matches
+                .next()
+                .ok_or(Error::Invalid("Unknown recovery word; check its spelling"))?;
+            if matches.next().is_some() {
+                return Err(Error::Invalid("Recovery word prefix is ambiguous"));
+            }
+            first
+        } else {
+            return Err(Error::Invalid(
+                "Use complete recovery words or their first four letters",
+            ));
+        };
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(full);
+        Ok(())
+    };
+    if numbered {
+        for (index, line) in phrase
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .enumerate()
+        {
+            let (number, word) = line.trim().split_once('.').ok_or(Error::Invalid(
+                "Numbered phrases need one word per line, like 1. word",
+            ))?;
+            if number != (index + 1).to_string() || word.split_whitespace().count() != 1 {
+                return Err(Error::Invalid(
+                    "Use one numbered word per line in order, starting at 1. Do not put numbered words on the same line",
+                ));
+            }
+            push_word(word.trim())?;
+        }
+    } else {
+        for word in phrase.split_whitespace() {
+            push_word(word)?;
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -86,6 +140,41 @@ mod tests {
                 assert!(phrase.starts_with(&prefix));
                 validate(&phrase).unwrap();
             }
+        }
+    }
+    #[test]
+    fn human_phrase_formats_are_canonical_and_unambiguous() {
+        let phrase = generate(12, "", Some(&"0".repeat(128))).unwrap();
+        let numbered = phrase
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, w)| format!("{}. {}", i + 1, &w[..4]))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        assert_eq!(*validate(&numbered).unwrap(), *phrase);
+        assert_eq!(
+            *validate(&phrase.replace(' ', "\n").to_uppercase()).unwrap(),
+            *phrase
+        );
+        assert_eq!(
+            *validate(
+                &phrase
+                    .split_whitespace()
+                    .map(|w| &w[..4])
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+            .unwrap(),
+            *phrase
+        );
+        assert!(validate(&numbered.replace("\r\n", " ")).is_err());
+        assert!(validate(&numbered.replacen("2.", "3.", 1)).is_err());
+        assert!(validate(&numbered.replacen("2. aban", "2aban", 1)).is_err());
+        assert!(validate(&phrase.replacen("abandon", "aba", 1)).is_err());
+        assert!(validate(&phrase.replacen("abandon", "abandox", 1)).is_err());
+        assert!(validate(&phrase.replace("about", "abandon")).is_err());
+        for word in Language::English.word_list() {
+            assert_eq!(&*input_words(&word[..word.len().min(4)]).unwrap(), *word);
         }
     }
     #[test]

@@ -43,6 +43,8 @@ pub struct OutputView {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inspection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multisig: Option<Vec<crate::multisig_psbt::Status>>,
     pub request_id: Uuid,
     pub digest: String,
     pub network: Network,
@@ -54,6 +56,8 @@ pub struct Inspection {
     pub lock_time: u32,
     pub version: i32,
     pub external_state: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<crate::chains::transactions::Details>,
 }
 fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64> {
     values.try_fold(0u64, |sum, value| {
@@ -63,6 +67,9 @@ fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64> {
     })
 }
 pub fn parse(request: &Request) -> Result<Psbt> {
+    if !request.network.is_bitcoin() || request.kind != "bitcoin-psbt" {
+        return Err(Error::Invalid("Bitcoin request network"));
+    }
     let psbt = Psbt::deserialize(&request.validate()?)
         .map_err(|_| Error::Invalid("PSBT serialization"))?;
     if psbt.version != 0
@@ -83,8 +90,10 @@ pub fn parse(request: &Request) -> Result<Psbt> {
 pub fn inspect(request: &Request, accounts: &[Account]) -> Result<Inspection> {
     let psbt = parse(request)?;
     let mut inputs = vec![];
+    let mut statuses = vec![];
+    let multisig = psbt.inputs.iter().any(|i| i.witness_script.is_some());
     let mut seen = HashSet::new();
-    for (txin, input) in psbt.unsigned_tx.input.iter().zip(&psbt.inputs) {
+    for (index, (txin, input)) in psbt.unsigned_tx.input.iter().zip(&psbt.inputs).enumerate() {
         if !seen.insert(txin.previous_output) {
             return Err(Error::Invalid("duplicate input"));
         }
@@ -92,7 +101,7 @@ pub fn inspect(request: &Request, accounts: &[Account]) -> Result<Inspection> {
             || !txin.witness.is_empty()
             || input.final_script_sig.is_some()
             || input.final_script_witness.is_some()
-            || !input.partial_sigs.is_empty()
+            || (!multisig && !input.partial_sigs.is_empty())
         {
             return Err(Error::Unsupported("already signed PSBT input"));
         }
@@ -111,7 +120,15 @@ pub fn inspect(request: &Request, accounts: &[Account]) -> Result<Inspection> {
                 return Err(Error::Invalid("conflicting UTXO data"));
             }
         }
-        if !output.script_pubkey.is_p2wpkh()
+        if multisig {
+            let policy = crate::multisig_psbt::policy(&psbt, index, request.network, accounts)?;
+            statuses.push(crate::multisig_psbt::validate_signatures(
+                &psbt,
+                index,
+                policy,
+                request.network,
+            )?);
+        } else if !output.script_pubkey.is_p2wpkh()
             || input.redeem_script.is_some()
             || input.witness_script.is_some()
             || input.tap_internal_key.is_some()
@@ -164,14 +181,25 @@ pub fn inspect(request: &Request, accounts: &[Account]) -> Result<Inspection> {
     let fee_sats = total_input_sats
         .checked_sub(total_output_sats)
         .ok_or(Error::Invalid("outputs exceed inputs"))?;
-    let estimated_vbytes = psbt.unsigned_tx.vsize() + 28 * inputs.len() + 1;
+    let witness_bytes: usize = if multisig {
+        statuses
+            .iter()
+            .map(|s| {
+                3 + 74 * s.required as usize + 34 * s.total + 3 + if s.total > 7 { 2 } else { 0 }
+            })
+            .sum()
+    } else {
+        109 * inputs.len()
+    };
+    let estimated_vbytes = psbt.unsigned_tx.vsize() + (witness_bytes + 2).div_ceil(4);
     let fee_rate = fee_sats as f64 / estimated_vbytes as f64;
     if fee_sats > 1_000_000 || fee_rate > 500.0 {
         return Err(Error::Invalid(
-            "fee exceeds the initial build policy (1,000,000 sat or 500 sat/vB)",
+            "fee exceeds the limit (1,000,000 sat or 500 sat/vB)",
         ));
     }
     Ok(Inspection {
+        multisig: if multisig { Some(statuses) } else { None },
         request_id: request.request_id,
         digest: request.binding()?,
         network: request.network,
@@ -183,6 +211,7 @@ pub fn inspect(request: &Request, accounts: &[Account]) -> Result<Inspection> {
         lock_time: psbt.unsigned_tx.lock_time.to_consensus_u32(),
         version: psbt.unsigned_tx.version.0,
         external_state: true,
+        chain: None,
     })
 }
 struct BitcoinContext;
@@ -270,6 +299,18 @@ pub fn verify(request: &Request, response: &Response, accounts: &[Account]) -> R
     {
         return Err(Error::Verification);
     }
+    for (actual, expected) in signed.input.iter().zip(&unsigned.input) {
+        if actual.previous_output != expected.previous_output
+            || actual.sequence != expected.sequence
+            || !actual.script_sig.is_empty()
+        {
+            return Err(Error::Verification);
+        }
+    }
+    if inspection.multisig.is_some() {
+        crate::multisig_psbt::verify_witnesses(request, &signed, accounts)?;
+        return Ok(inspection);
+    }
     let secp = Secp256k1::verification_only();
     let mut cache = SighashCache::new(&signed);
     for (index, (actual, expected)) in signed.input.iter().zip(&unsigned.input).enumerate() {
@@ -317,13 +358,13 @@ pub fn verify(request: &Request, response: &Response, accounts: &[Account]) -> R
     }
     Ok(inspection)
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Utxo {
     pub transaction_hex: String,
     pub vout: u32,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Recipient {
     pub address: String,
@@ -337,6 +378,9 @@ pub fn construct(
     fee_sats: u64,
     accounts: &[Account],
 ) -> Result<Request> {
+    if !network.is_bitcoin() {
+        return Err(Error::Invalid("Bitcoin network"));
+    }
     if utxos.is_empty() || utxos.len() > 100 || recipients.is_empty() || recipients.len() > 99 {
         return Err(Error::Invalid("input/output count"));
     }
@@ -425,8 +469,42 @@ pub fn construct(
         Psbt::from_unsigned_tx(tx).map_err(|_| Error::Invalid("unsigned transaction"))?;
     for (input, (prev, output)) in psbt.inputs.iter_mut().zip(previous) {
         input.non_witness_utxo = Some(prev);
+        if output.script_pubkey.is_p2wsh() {
+            let account = accounts
+                .iter()
+                .find(|a| {
+                    a.network == network
+                        && a.multisig.as_ref().is_some_and(|p| {
+                            p.script(network)
+                                .is_ok_and(|s| s.to_p2wsh() == output.script_pubkey)
+                        })
+                })
+                .ok_or(Error::Invalid("unknown multisig input"))?;
+            let policy = account.multisig.as_ref().ok_or(Error::Verification)?;
+            input.witness_script = Some(policy.script(network)?);
+            for (key, origin) in policy.derived(network)? {
+                input.bip32_derivation.insert(key.inner, origin);
+            }
+        }
         input.witness_utxo = Some(output);
         input.sighash_type = Some(EcdsaSighashType::All.into());
+    }
+    // Include public change origins so other PSBT wallets can identify registered change.
+    for (metadata, output) in psbt.outputs.iter_mut().zip(&psbt.unsigned_tx.output) {
+        let address = Address::from_script(&output.script_pubkey, network.native())
+            .map_err(|_| Error::Invalid("output address"))?
+            .to_string();
+        if let Some(account) = accounts
+            .iter()
+            .find(|a| a.network == network && a.address == address && a.multisig.is_some())
+        {
+            let policy = account.multisig.as_ref().ok_or(Error::Verification)?;
+            policy.validate_account(account)?;
+            metadata.witness_script = Some(policy.script(network)?);
+            for (key, origin) in policy.derived(network)? {
+                metadata.bip32_derivation.insert(key.inner, origin);
+            }
+        }
     }
     let request = Request::bitcoin(network, &psbt.serialize(), "Bitcoin transfer".into());
     inspect(&request, accounts)?;

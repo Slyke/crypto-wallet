@@ -6,8 +6,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-pub const MAX_EXCHANGE_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
+pub const MAX_EXCHANGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -65,7 +65,10 @@ impl Request {
         Ok(request)
     }
     pub fn validate(&self) -> Result<Vec<u8>> {
-        if self.format != "airvault-request" || self.version != 1 || self.kind != "bitcoin-psbt" {
+        if self.format != "airvault-request"
+            || self.version != 1
+            || !["bitcoin-psbt", "chain-transaction"].contains(&self.kind.as_str())
+        {
             return Err(Error::Unsupported("request format, version or operation"));
         }
         if self.description.len() > 512 {
@@ -146,6 +149,20 @@ impl PublicBundle {
                 ));
             }
             crate::model::label(&a.label)?;
+            if a.tokens.len() > 100 {
+                return Err(Error::Invalid("token limit"));
+            }
+            for token in &a.tokens {
+                token.validate(a.network)?;
+            }
+            if let Some(policy) = &a.multisig {
+                policy.validate_account(a)?;
+                continue;
+            }
+            if !a.network.is_bitcoin() {
+                crate::chains::keys::validate_public(a)?;
+                continue;
+            }
             let key = a
                 .public_key
                 .parse::<::bitcoin::PublicKey>()

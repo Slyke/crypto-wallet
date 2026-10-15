@@ -25,6 +25,26 @@ pub enum Network {
     Testnet4,
     Signet,
     Regtest,
+    Ethereum,
+    Sepolia,
+    Bnb,
+    Polygon,
+    Avalanche,
+    Arbitrum,
+    Optimism,
+    Base,
+    Litecoin,
+    Dogecoin,
+    BitcoinCash,
+    Solana,
+    SolanaDevnet,
+    Polkadot,
+    Cardano,
+    CardanoPreprod,
+    Cosmos,
+    Xrp,
+    Tron,
+    TronNile,
 }
 impl Network {
     pub fn native(self) -> ::bitcoin::Network {
@@ -34,6 +54,7 @@ impl Network {
             Self::Testnet4 => ::bitcoin::Network::Testnet4,
             Self::Signet => ::bitcoin::Network::Signet,
             Self::Regtest => ::bitcoin::Network::Regtest,
+            _ => ::bitcoin::Network::Bitcoin,
         }
     }
 }
@@ -59,6 +80,8 @@ pub struct Identity {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Account {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multisig: Option<crate::multisig::Policy>,
     pub id: Uuid,
     pub identity_id: Option<Uuid>,
     pub label: String,
@@ -68,6 +91,33 @@ pub struct Account {
     pub public_key: String,
     pub fingerprint: String,
     pub watch_only: bool,
+    #[serde(default)]
+    pub tokens: Vec<Token>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Token {
+    pub standard: String,
+    pub contract: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+impl Token {
+    pub fn validate(&self, network: Network) -> crate::Result<()> {
+        let expected = network.chain().tokens.to_ascii_lowercase().replace('-', "");
+        if self.standard != expected
+            || expected.is_empty()
+            || self.symbol.is_empty()
+            || self.symbol.len() > 16
+            || !self.symbol.bytes().all(|b| b.is_ascii_alphanumeric())
+            || self.decimals > 36
+            || (expected == "spl" && self.decimals > 18)
+        {
+            return Err(crate::Error::Invalid("token standard, symbol or decimals"));
+        }
+        crate::chains::keys::address_bytes(&self.contract, network)?;
+        Ok(())
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -83,9 +133,11 @@ pub struct History {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Settings {
     pub mode: Mode,
-    pub timeout_seconds: u64,
+    pub timeout_seconds: i64,
     pub lock_on_blur: bool,
     pub rpc_url: String,
+    #[serde(default)]
+    pub providers: std::collections::BTreeMap<String, String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -94,12 +146,15 @@ impl Default for Settings {
             timeout_seconds: 300,
             lock_on_blur: false,
             rpc_url: String::new(),
+            providers: Default::default(),
         }
     }
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct VaultData {
+    #[serde(default)]
+    pub psbts: Vec<crate::multisig_psbt::Progress>,
     pub settings: Settings,
     pub roots: Vec<Root>,
     pub identities: Vec<Identity>,
@@ -123,4 +178,24 @@ pub fn label(value: &str) -> crate::Result<String> {
         ));
     }
     Ok(value.to_owned())
+}
+
+impl Settings {
+    pub fn provider(&self, network: Network) -> String {
+        let key = serde_json::to_value(network)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        self.providers
+            .get(&key)
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if network.is_bitcoin() {
+                    self.rpc_url.clone()
+                } else {
+                    String::new()
+                }
+            })
+    }
 }

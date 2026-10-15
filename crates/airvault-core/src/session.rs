@@ -1,5 +1,6 @@
 use crate::{
-    bitcoin::{self, Inspection},
+    bitcoin::Inspection,
+    chains::transactions as bitcoin,
     entropy,
     model::{self, Account, History, Identity, Mode, Root, Settings, VaultData},
     protocol::{PublicBundle, Request, Response},
@@ -53,6 +54,7 @@ pub struct Review {
     pub inspection: Inspection,
 }
 pub struct Session {
+    broadcast_receipts: Vec<History>,
     path: PathBuf,
     vault: Option<OpenVault>,
     ceremony: Option<PendingCeremony>,
@@ -63,6 +65,7 @@ pub struct Session {
 impl Session {
     pub fn new(path: PathBuf) -> Self {
         Self {
+            broadcast_receipts: vec![],
             path,
             vault: None,
             ceremony: None,
@@ -100,6 +103,7 @@ impl Session {
         let mut vault = OpenVault::create(password, data)?;
         vault.save(&self.path)?;
         self.vault = Some(vault);
+        self.flush_receipts();
         self.touch();
         Ok(())
     }
@@ -116,8 +120,49 @@ impl Session {
             return Err(Error::Mode);
         }
         self.vault = Some(vault);
+        self.flush_receipts();
         self.touch();
         Ok(())
+    }
+    /// Public receipts survive an automatic lock; their encrypted history is saved on unlock.
+    pub fn record_broadcast(&mut self, receipt: History) {
+        if !self
+            .broadcast_receipts
+            .iter()
+            .any(|r| r.request_id == receipt.request_id && r.txid == receipt.txid)
+        {
+            self.broadcast_receipts.push(receipt);
+        }
+        self.flush_receipts();
+    }
+    fn flush_receipts(&mut self) {
+        if self.vault.is_none() || self.broadcast_receipts.is_empty() {
+            return;
+        }
+        let receipts = self.broadcast_receipts.clone();
+        if self
+            .mutate(|v| {
+                for receipt in &receipts {
+                    let matching = v.data.pending.iter().any(|r| {
+                        r.request_id == receipt.request_id
+                            && r.binding().ok().as_deref() == Some(receipt.digest.as_str())
+                    });
+                    if matching
+                        && !v.data.history.iter().any(|h| {
+                            h.action == "broadcast"
+                                && h.request_id == receipt.request_id
+                                && h.txid == receipt.txid
+                        })
+                    {
+                        v.data.history.push(receipt.clone());
+                    }
+                }
+                Ok(())
+            })
+            .is_ok()
+        {
+            self.broadcast_receipts.clear();
+        }
     }
     pub fn cancel_ceremony(&mut self) {
         self.ceremony = None;
@@ -134,7 +179,9 @@ impl Session {
         let missed = self.last_tick.elapsed() > Duration::from_secs(15);
         self.last_tick = Instant::now();
         if self.vault.as_ref().is_some_and(|v| {
-            self.last_activity.elapsed().as_secs() >= v.data.settings.timeout_seconds
+            v.data.settings.timeout_seconds != -1
+                && self.last_activity.elapsed().as_secs()
+                    >= v.data.settings.timeout_seconds.max(0) as u64
         }) || missed
         {
             self.lock();
@@ -201,18 +248,39 @@ impl Session {
         password: Option<&str>,
     ) -> Result<Uuid> {
         use subtle::ConstantTimeEq;
-        let pending = self.ceremony.take().ok_or(Error::Approval)?;
+        self.tick();
+        let pending = self.ceremony.as_ref().ok_or(Error::Approval)?;
         if pending.token != token || pending.at.elapsed() > Duration::from_secs(300) {
             return Err(Error::Approval);
         }
         let confirmation = entropy::validate(confirmation)?;
         if !bool::from(confirmation.as_bytes().ct_eq(pending.phrase.as_bytes())) {
             return Err(Error::Invalid(
-                "recovery confirmation did not match; begin creation again",
+                "Recovery confirmation did not match. Check your words and try again",
             ));
         }
-        self.mutate(|v| v.import_phrase(label, &pending.phrase, password))
+        let id = self.mutate(|v| v.import_phrase(label, &confirmation, password))?;
+        self.ceremony = None;
+        Ok(id)
     }
+    pub fn delete_account(&mut self, account_id: Uuid, confirmed: bool) -> Result<()> {
+        if !confirmed {
+            return Err(Error::Approval);
+        }
+        self.mutate(|v| {
+            let index = v
+                .data
+                .accounts
+                .iter()
+                .position(|a| a.id == account_id)
+                .ok_or(Error::NotFound)?;
+            v.data.accounts.remove(index);
+            Ok(())
+        })?;
+        self.approval = None;
+        Ok(())
+    }
+
     pub fn import_public(&mut self, bytes: &[u8]) -> Result<()> {
         let bundle = PublicBundle::parse(bytes)?;
         self.mutate(|v| {
@@ -263,12 +331,20 @@ impl Session {
             .iter()
             .find(|r| r.request_id == id)
             .ok_or(Error::NotFound)?;
-        let inspection =
+        let mut inspection =
             if let Some(response) = vault.data.responses.iter().find(|r| r.request_id == id) {
                 bitcoin::verify(request, response, &vault.data.accounts)?
             } else {
                 bitcoin::inspect(request, &vault.data.accounts)?
             };
+        if let Some(progress) = vault.data.psbts.iter().find(|p| p.request_id == id) {
+            let current = crate::multisig_psbt::decode(&progress.payload.decode()?)?;
+            inspection = crate::bitcoin::inspect(
+                &crate::multisig_psbt::request_with(request, &current),
+                &vault.data.accounts,
+            )?;
+            inspection.digest = request.binding()?;
+        }
         let token = Uuid::new_v4();
         self.approval = Some(Approval {
             token,
@@ -351,9 +427,9 @@ impl Session {
                     .ok_or(Error::NotFound)?;
                 let password = key_passwords.get(&identity.root_id).map(|p| p.as_str());
                 let (key, _) =
-                    vault.derive_secret(identity_id, account.network, &account.path, password)?;
+                    vault.derive_material(identity_id, account.network, &account.path, password)?;
                 let (address, public) =
-                    crate::wallet::public_account(&key, account.network, &account.path)?;
+                    crate::chains::keys::public_account(&key, account.network, &account.path)?;
                 if address != input.address || public != account.public_key {
                     return Err(Error::Verification);
                 }
@@ -405,7 +481,18 @@ impl Session {
         if !confirmed {
             return Err(Error::Approval);
         }
-        if !(30..=3600).contains(&settings.timeout_seconds) || settings.rpc_url.len() > 2048 {
+        if settings.timeout_seconds != -1 && !(30..=3600).contains(&settings.timeout_seconds) {
+            return Err(Error::Invalid(
+                "Auto-lock must be -1 (never) or 30 to 3600 seconds",
+            ));
+        }
+        if settings.rpc_url.len() > 2048
+            || settings.providers.len() > 30
+            || settings
+                .providers
+                .iter()
+                .any(|(k, v)| k.len() > 30 || v.len() > 2048)
+        {
             return Err(Error::Invalid("settings bounds"));
         }
         if !cfg!(feature = "network") && settings.mode != Mode::Offline {
@@ -480,6 +567,121 @@ mod lifecycle_tests {
         assert!(session.snapshot().roots.is_empty());
     }
     #[test]
+    fn never_inactivity_lock_persists_but_explicit_and_lifecycle_locks_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.avvault");
+        let mut session = Session::new(path.clone());
+        session
+            .create("public-test-password", Mode::Offline)
+            .unwrap();
+        let original = session.vault().unwrap().data.settings.clone();
+        for invalid in [-2, 0, 29, 3601] {
+            let mut settings = original.clone();
+            settings.timeout_seconds = invalid;
+            assert!(session
+                .settings(settings, "public-test-password", true)
+                .is_err());
+        }
+        let mut settings = original;
+        settings.timeout_seconds = -1;
+        session
+            .settings(settings, "public-test-password", true)
+            .unwrap();
+        session.last_activity = Instant::now() - Duration::from_secs(86_400);
+        session.tick();
+        assert!(session.snapshot().unlocked);
+        session.lock();
+        assert!(!session.snapshot().unlocked);
+        session.unlock("public-test-password").unwrap();
+        assert_eq!(session.vault().unwrap().data.settings.timeout_seconds, -1);
+        session.last_tick = Instant::now() - Duration::from_secs(16);
+        session.tick();
+        assert!(!session.snapshot().unlocked);
+        session.unlock("public-test-password").unwrap();
+        session
+            .mutate(|v| {
+                v.data.settings.lock_on_blur = true;
+                Ok(())
+            })
+            .unwrap();
+        session.focus_lost();
+        assert!(!session.snapshot().unlocked);
+        drop(session);
+        assert!(!Session::new(path).snapshot().unlocked);
+    }
+    #[test]
+    fn phrase_confirmation_retries_without_losing_the_ceremony() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new(dir.path().join("vault.avvault"));
+        session
+            .create("public-test-password", Mode::Offline)
+            .unwrap();
+        let ceremony = session.generate(12, "", Some(&"0".repeat(128))).unwrap();
+        assert!(session
+            .confirm_phrase(ceremony.token, "typo", "Test", None)
+            .is_err());
+        let different = entropy::generate(12, "", Some(&"1".repeat(128))).unwrap();
+        assert!(session
+            .confirm_phrase(ceremony.token, &different, "Test", None)
+            .is_err());
+        assert!(session.ceremony.is_some());
+        session
+            .confirm_phrase(ceremony.token, &ceremony.phrase, "Test", None)
+            .unwrap();
+        assert!(session.ceremony.is_none());
+        assert!(session
+            .confirm_phrase(ceremony.token, &ceremony.phrase, "Test", None)
+            .is_err());
+        assert_eq!(session.snapshot().roots.len(), 1);
+    }
+    #[test]
+    fn account_deletion_preserves_recovery_and_invalidates_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new(dir.path().join("vault.avvault"));
+        session
+            .create("public-test-password", Mode::Offline)
+            .unwrap();
+        let phrase = entropy::generate(12, "", Some(&"0".repeat(128))).unwrap();
+        let identity = session
+            .mutate(|v| v.import_phrase("Test", &phrase, None))
+            .unwrap();
+        let path = "m/84'/1'/0'/0/0";
+        let id = session
+            .mutate(|v| {
+                v.derive_account(identity, "Test", crate::model::Network::Testnet, path, None)
+            })
+            .unwrap();
+        let address = session.snapshot().accounts[0].address.clone();
+        session.approval = Some(Approval {
+            token: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            digest: String::new(),
+            at: Instant::now(),
+        });
+        assert!(session.delete_account(id, false).is_err());
+        assert_eq!(session.snapshot().accounts.len(), 1);
+        session.delete_account(id, true).unwrap();
+        assert!(session.approval.is_none());
+        session.lock();
+        session.unlock("public-test-password").unwrap();
+        assert!(session.snapshot().accounts.is_empty());
+        assert_eq!(session.snapshot().roots.len(), 1);
+        session
+            .mutate(|v| {
+                v.derive_account(
+                    identity,
+                    "Restored",
+                    crate::model::Network::Testnet,
+                    path,
+                    None,
+                )
+            })
+            .unwrap();
+        assert_eq!(session.snapshot().accounts[0].address, address);
+        session.lock();
+        assert!(session.delete_account(id, true).is_err());
+    }
+    #[test]
     fn expired_approval_fails_before_key_or_request_lookup() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::new(dir.path().join("vault.avvault"));
@@ -502,4 +704,233 @@ mod lifecycle_tests {
         session.tick();
         assert!(!session.snapshot().unlocked);
     }
+}
+
+impl Session {
+    pub fn psbt_bytes(&self, id: Uuid) -> Result<Vec<u8>> {
+        let vault = self.vault()?;
+        let request = vault
+            .data
+            .pending
+            .iter()
+            .find(|r| r.request_id == id)
+            .ok_or(Error::NotFound)?;
+        if let Some(progress) = vault.data.psbts.iter().find(|p| p.request_id == id) {
+            return progress.payload.decode();
+        }
+        request.validate()
+    }
+    pub fn import_psbt(&mut self, bytes: &[u8], network: model::Network) -> Result<Uuid> {
+        use crate::multisig_psbt as multi;
+        let incoming = multi::decode(bytes)?;
+        let probe = Request::bitcoin(
+            network,
+            &incoming.serialize(),
+            "Bitcoin multisig transfer".into(),
+        );
+        if !multi::is_multisig(&probe)? {
+            return Err(Error::Invalid(
+                "PSBT import requires native SegWit multisig inputs",
+            ));
+        }
+        crate::bitcoin::inspect(&probe, &self.vault()?.data.accounts)?;
+        self.approval = None;
+        self.mutate(|v| {
+            let existing = v
+                .data
+                .pending
+                .iter()
+                .find(|r| {
+                    r.network == network
+                        && crate::bitcoin::parse(r)
+                            .is_ok_and(|p| p.unsigned_tx == incoming.unsigned_tx)
+                })
+                .cloned();
+            let request = if let Some(request) = existing {
+                request
+            } else {
+                if v.data.pending.len() >= 500 {
+                    return Err(Error::Invalid("pending request limit"));
+                }
+                let mut unsigned = incoming.clone();
+                for input in &mut unsigned.inputs {
+                    input.partial_sigs.clear();
+                }
+                let request = multi::request_with(&probe, &unsigned);
+                v.data.pending.push(request.clone());
+                request
+            };
+            let current = if let Some(progress) = v
+                .data
+                .psbts
+                .iter()
+                .find(|p| p.request_id == request.request_id)
+            {
+                multi::decode(&progress.payload.decode()?)?
+            } else {
+                crate::bitcoin::parse(&request)?
+            };
+            let merged = multi::merge(&request, &current, &incoming, &v.data.accounts)?;
+            save_psbt_progress(v, &request, &merged)?;
+            Ok(request.request_id)
+        })
+    }
+    pub fn sign_multisig(
+        &mut self,
+        token: Uuid,
+        confirmed: bool,
+        master_password: &str,
+        key_passwords: &HashMap<Uuid, Zeroizing<String>>,
+        selected_accounts: &[Uuid],
+    ) -> Result<Uuid> {
+        use crate::multisig_psbt as multi;
+        let approval = self.approval.take().ok_or(Error::Approval)?;
+        if !confirmed || token != approval.token || approval.at.elapsed() > Duration::from_secs(120)
+        {
+            return Err(Error::Approval);
+        }
+        self.mutate(|v| {
+            if !v.data.settings.mode.can_sign() {
+                return Err(Error::Mode);
+            }
+            v.authenticate(master_password)?;
+            let request = v
+                .data
+                .pending
+                .iter()
+                .find(|r| r.request_id == approval.request_id)
+                .ok_or(Error::NotFound)?
+                .clone();
+            if request.binding()? != approval.digest || !multi::is_multisig(&request)? {
+                return Err(Error::Approval);
+            }
+            if v.data
+                .responses
+                .iter()
+                .any(|r| r.request_id == request.request_id)
+            {
+                return Err(Error::Duplicate);
+            }
+            let current = if let Some(progress) = v
+                .data
+                .psbts
+                .iter()
+                .find(|p| p.request_id == request.request_id)
+            {
+                multi::decode(&progress.payload.decode()?)?
+            } else {
+                crate::bitcoin::parse(&request)?
+            };
+            let inspection = crate::bitcoin::inspect(
+                &multi::request_with(&request, &current),
+                &v.data.accounts,
+            )?;
+            let mut keys = vec![];
+            for (index, input) in inspection.inputs.iter().enumerate() {
+                let matches: Vec<_> = v
+                    .data
+                    .accounts
+                    .iter()
+                    .filter(|a| {
+                        input.account_ids.contains(&a.id)
+                            && a.identity_id.is_some()
+                            && !a.watch_only
+                            && a.multisig.is_some()
+                    })
+                    .collect();
+                // Missing local keys are expected in a multisig round.
+                if matches.is_empty() {
+                    continue;
+                }
+                let account = if matches.len() == 1 {
+                    matches[0]
+                } else {
+                    let selected: Vec<_> = matches
+                        .iter()
+                        .filter(|a| selected_accounts.contains(&a.id))
+                        .collect();
+                    if selected.len() != 1 {
+                        return Err(Error::Invalid("select one local cosigner for each input"));
+                    }
+                    *selected[0]
+                };
+                let identity_id = account.identity_id.ok_or(Error::Verification)?;
+                let identity = v
+                    .data
+                    .identities
+                    .iter()
+                    .find(|i| i.id == identity_id)
+                    .ok_or(Error::NotFound)?;
+                let password = key_passwords.get(&identity.root_id).map(|p| p.as_str());
+                let policy = account.multisig.as_ref().ok_or(Error::Verification)?;
+                policy.validate_account(account)?;
+                let (secret, fingerprint) =
+                    v.derive_secret(identity_id, account.network, &account.path, password)?;
+                if fingerprint != account.fingerprint {
+                    return Err(Error::Verification);
+                }
+                let mut key = ::bitcoin::secp256k1::SecretKey::from_slice(&*secret)
+                    .map_err(|_| Error::Verification)?;
+                let public =
+                    ::bitcoin::PublicKey::new(::bitcoin::secp256k1::PublicKey::from_secret_key(
+                        &::bitcoin::secp256k1::Secp256k1::new(),
+                        &key,
+                    ));
+                key.non_secure_erase();
+                if public.to_string() != account.public_key
+                    || !policy
+                        .derived(request.network)?
+                        .iter()
+                        .any(|k| k.0 == public)
+                {
+                    return Err(Error::Verification);
+                }
+                if !current.inputs[index].partial_sigs.contains_key(&public) {
+                    keys.push((index, secret));
+                }
+            }
+            let signed = multi::sign(&request, &current, &v.data.accounts, &keys)?;
+            save_psbt_progress(v, &request, &signed)?;
+            v.data.history.push(History {
+                id: Uuid::new_v4(),
+                request_id: request.request_id,
+                action: "cosigned".into(),
+                at: model::now(),
+                digest: approval.digest,
+                txid: None,
+            });
+            Ok(request.request_id)
+        })
+    }
+}
+fn save_psbt_progress(
+    v: &mut OpenVault,
+    request: &Request,
+    psbt: &::bitcoin::psbt::Psbt,
+) -> Result<()> {
+    let response = crate::multisig_psbt::finalize(request, psbt, &v.data.accounts)?;
+    v.data.psbts.retain(|p| p.request_id != request.request_id);
+    v.data.psbts.push(crate::multisig_psbt::Progress {
+        request_id: request.request_id,
+        payload: crate::protocol::Payload::new(&psbt.serialize()),
+    });
+    if let Some(response) = response {
+        if !v
+            .data
+            .responses
+            .iter()
+            .any(|r| r.request_id == request.request_id)
+        {
+            v.data.history.push(History {
+                id: Uuid::new_v4(),
+                request_id: request.request_id,
+                action: "finalized".into(),
+                at: model::now(),
+                digest: request.binding()?,
+                txid: Some(response.txid.clone()),
+            });
+            v.data.responses.push(response);
+        }
+    }
+    Ok(())
 }

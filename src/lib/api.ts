@@ -1,6 +1,31 @@
 import { invoke } from '@tauri-apps/api/core';
 export type Mode = 'offline' | 'proxy' | 'combined';
-export type Network = 'bitcoin' | 'testnet' | 'testnet4' | 'signet' | 'regtest';
+export type Network =
+    | 'bitcoin'
+    | 'testnet'
+    | 'testnet4'
+    | 'signet'
+    | 'regtest'
+    | 'ethereum'
+    | 'sepolia'
+    | 'bnb'
+    | 'polygon'
+    | 'avalanche'
+    | 'arbitrum'
+    | 'optimism'
+    | 'base'
+    | 'litecoin'
+    | 'dogecoin'
+    | 'bitcoin_cash'
+    | 'solana'
+    | 'solana_devnet'
+    | 'polkadot'
+    | 'cardano'
+    | 'cardano_preprod'
+    | 'cosmos'
+    | 'xrp'
+    | 'tron'
+    | 'tron_nile';
 export interface Root {
     id: string;
     label: string;
@@ -14,7 +39,30 @@ export interface Identity {
     label: string;
     passphraseRecord: string | null;
 }
+export interface Cosigner {
+    fingerprint: string;
+    path: string;
+    xpub: string;
+}
+export interface MultisigPolicy {
+    threshold: number;
+    cosigners: Cosigner[];
+    branch: number;
+    index: number;
+}
+export interface MultisigBackup {
+    format: string;
+    version: number;
+    label: string;
+    network: Network;
+    policy: MultisigPolicy;
+    address: string;
+    receiveDescriptor: string;
+    changeDescriptor: string;
+    checksum: string;
+}
 export interface Account {
+    multisig?: MultisigPolicy;
     id: string;
     identityId: string | null;
     label: string;
@@ -24,6 +72,7 @@ export interface Account {
     publicKey: string;
     fingerprint: string;
     watchOnly: boolean;
+    tokens: { standard: string; contract: string; symbol: string; decimals: number }[];
 }
 export interface Request {
     requestId: string;
@@ -42,6 +91,7 @@ export interface Settings {
     timeoutSeconds: number;
     lockOnBlur: boolean;
     rpcUrl: string;
+    providers: Record<string, string>;
 }
 export interface History {
     id: string;
@@ -64,6 +114,8 @@ export interface Snapshot {
     responses: Response[];
 }
 export interface Inspection {
+    multisig?: { required: number; total: number; signed: number; fingerprints: string[] }[];
+    chain?: { title: string; amount: string; fee: string; fields: [string, string][] };
     requestId: string;
     digest: string;
     network: Network;
@@ -80,11 +132,12 @@ export interface Review {
     inspection: Inspection;
 }
 export interface Capability {
-    network: string;
-    derivation: string;
-    signing: string;
-    messages: string;
-    note: string;
+    network: Network;
+    name: string;
+    symbol: string;
+    decimals: number;
+    path: string;
+    tokens: string;
 }
 export const emptySnapshot: Snapshot = {
     initialized: false,
@@ -112,3 +165,14 @@ export const satoshis = ({ value }: { value: string }): number => {
     if (!Number.isSafeInteger(amount) || amount > 2100000000000000) throw new Error('Amount is outside the Bitcoin range.');
     return amount;
 };
+
+export interface AppInfo {
+    version: string;
+    buildHash: string;
+    sourceHash: string;
+    builtAt: string | number;
+    target: string;
+    dirty: boolean;
+    binaryPath: string;
+    binarySha256: string;
+}

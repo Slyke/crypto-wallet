@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { call, type Snapshot, type Review } from './api';
+    import Info from './Info.svelte';
     import { l } from './i18n';
     let {
         snapshotView,
@@ -24,12 +25,23 @@
     let passwords = $state<Record<string, string>>({}),
         selected = $state<Record<string, string>>({});
     const response = $derived(snapshotView.responses.find((r) => r.requestId === review.inspection.requestId));
+    const hasUnsignedLocal = $derived(
+        review.inspection.inputs.some((input, index) =>
+            snapshotView.accounts.some(
+                (account) =>
+                    input.accountIds.includes(account.id) &&
+                    !account.watchOnly &&
+                    account.identityId &&
+                    !review.inspection.multisig?.[index]?.fingerprints.includes(account.fingerprint),
+            ),
+        ),
+    );
     const sign = () =>
         run({
             action: async () => {
                 try {
                     await call({
-                        command: 'approve_signing',
+                        command: review.inspection.multisig ? 'approve_multisig' : 'approve_signing',
                         args: {
                             token: review.token,
                             confirmed: approved,
@@ -45,7 +57,7 @@
                     approved = false;
                 }
             },
-            success: l.signed,
+            success: review.inspection.multisig ? l.multiSigned : l.signed,
         });
     const broadcast = () =>
         run({
@@ -78,32 +90,68 @@
     <div class="dialog-heading">
         <div>
             <div class="eyebrow">{l.review}</div>
-            <h2>{l.native} / {review.inspection.network}</h2>
+            <div class="heading-with-help">
+                <h2>{review.inspection.chain?.title ?? l.native} / {review.inspection.network}</h2>
+                <Info title={l.review} topic="signing"
+                    ><p>{l.reviewHelp}</p>
+                    <p>{l.externalHelp}</p></Info
+                >
+            </div>
         </div>
         <button onclick={onclose} disabled={busy}>{l.close}</button>
     </div>
-    <p>{l.reviewHelp}</p>
+
     {#if error}<div class="alert danger" role="alert">{error}</div>{/if}
-    <div class="alert warning">{l.external}. UTXO spend status cannot be established offline.</div>
-    <h3>{l.outputs}</h3>
-    {#each review.inspection.outputs as output, index}<article class="review-output">
-            <div class="section-heading">
-                <span>{index + 1}. {output.knownAccount ? l.known : l.destination}</span><strong
-                    >{output.satoshis.toLocaleString()} {l.sats}</strong
-                >
-            </div>
-            <code class="address">{output.address}</code>
-        </article>{/each}
-    <div class="stats compact">
-        <article><small>{l.totalInput}</small><strong>{review.inspection.totalInputSats.toLocaleString()}</strong></article>
-        <article><small>{l.networkFee}</small><strong>{review.inspection.feeSats.toLocaleString()}</strong></article>
-        <article><small>{l.feeRate}</small><strong>{review.inspection.feeRate.toFixed(2)}</strong></article>
-    </div>
+
+    {#if review.inspection.chain}
+        <div class="review-output">
+            <strong>{review.inspection.chain.amount}</strong>
+            <p>{l.networkFee}: {review.inspection.chain.fee}</p>
+        </div>
+        <dl class="chain-details">
+            {#each review.inspection.chain.fields as [key, value]}<dt>{key.replace(/([a-z])([A-Z])/g, '$1 $2')}</dt>
+                <dd><code>{value}</code></dd>{/each}
+        </dl>
+    {:else}
+        <h3>{l.outputs}</h3>
+        {#each review.inspection.outputs as output, index}<article class="review-output">
+                <div class="section-heading">
+                    <span>{index + 1}. {output.knownAccount ? l.known : l.destination}</span><strong
+                        >{output.satoshis.toLocaleString()} {l.sats}</strong
+                    >
+                </div>
+                <code class="address">{output.address}</code>
+            </article>{/each}
+        <div class="stats compact">
+            <article><small>{l.totalInput}</small><strong>{review.inspection.totalInputSats.toLocaleString()}</strong></article>
+            <article><small>{l.networkFee}</small><strong>{review.inspection.feeSats.toLocaleString()}</strong></article>
+            <article><small>{l.feeRate}</small><strong>{review.inspection.feeRate.toFixed(2)}</strong></article>
+        </div>
+    {/if}
     <h3>{l.inputs}</h3>
-    {#each review.inspection.inputs as input}
+    {#each review.inspection.inputs as input, inputIndex}
         {@const matches = snapshotView.accounts.filter((a) => input.accountIds.includes(a.id) && !a.watchOnly)}
         <article class="review-input">
-            <code class="address">{input.address}</code><strong>{input.satoshis.toLocaleString()} {l.sats}</strong>
+            {#if review.inspection.multisig}
+                {@const status = review.inspection.multisig[inputIndex]}
+                <div class="heading-with-help">
+                    <h3>{status.signed} / {status.required} {l.multiSignatures}</h3>
+                    <Info title={l.multisig} topic="multisigSigning"><p>{l.multiProgressHelp}</p></Info>
+                </div>
+                <p>{l.multiCosignerCount}: {status.total}</p>
+                {#if status.fingerprints.length}<p>{l.multiSignedBy}: {status.fingerprints.join(', ')}</p>{/if}
+                <details>
+                    <summary>{l.multiConfig}</summary
+                    >{#each snapshotView.accounts.find((a) => input.accountIds.includes(a.id) && a.multisig)?.multisig?.cosigners ?? [] as cosigner}<p
+                        >
+                            {cosigner.fingerprint} · {cosigner.path}
+                        </p>
+                        <code class="wrap">{cosigner.xpub}</code>{/each}
+                </details>
+            {/if}
+            <code class="address">{input.address}</code>{#if !review.inspection.chain}<strong
+                    >{input.satoshis.toLocaleString()} {l.sats}</strong
+                >{/if}
             {#if matches.length === 1}<p>{l.signer}: {matches[0].label} · {matches[0].path}</p>
             {:else if matches.length > 1}<label
                     >{l.selectSigner}<select bind:value={selected[input.outpoint]}
@@ -113,17 +161,17 @@
                     ></label
                 >
             {:else}<p class="muted">{l.noSigner}</p>{/if}
-            <details>
-                <summary>{l.advanced}</summary>
-                <dl>
-                    <dt>{l.outpoint}</dt>
-                    <dd><code class="wrap">{input.outpoint}</code></dd>
-                    <dt>{l.sequence}</dt>
-                    <dd>{input.sequence}</dd>
-                    <dt>{l.sighash}</dt>
-                    <dd>{input.sighash}</dd>
-                </dl>
-            </details>
+            {#if !review.inspection.chain}<details>
+                    <summary>{l.advanced}</summary>
+                    <dl>
+                        <dt>{l.outpoint}</dt>
+                        <dd><code class="wrap">{input.outpoint}</code></dd>
+                        <dt>{l.sequence}</dt>
+                        <dd>{input.sequence}</dd>
+                        <dt>{l.sighash}</dt>
+                        <dd>{input.sighash}</dd>
+                    </dl>
+                </details>{/if}
         </article>
     {/each}
     <details>
@@ -144,8 +192,12 @@
         >
     </details>
     {#if response}<div class="alert mid">{l.response}<code class="wrap">{response.txid}</code></div>{/if}
-    {#if !response && snapshotView.settings?.mode !== 'proxy'}
-        <p class="hint">{l.signHelp}</p>
+    {#if !response && review.inspection.multisig && !hasUnsignedLocal}<p class="alert mid">{l.multiWaiting}</p>{/if}
+    {#if !response && (!review.inspection.multisig || hasUnsignedLocal) && snapshotView.settings?.mode !== 'proxy'}
+        <div class="heading-with-help">
+            <h3>{l.signing}</h3>
+            <Info title={l.signing} topic={review.inspection.multisig ? 'multisigSigning' : 'signing'}><p>{l.signHelp}</p></Info>
+        </div>
         <label>{l.password}<input type="password" bind:value={password} autocomplete="off" /></label>
         {#each snapshotView.roots.filter((r) => r.customPassword && review.inspection.inputs.some( (i) => snapshotView.accounts.some((a) => i.accountIds.includes(a.id) && snapshotView.identities.some((id) => id.id === a.identityId && id.rootId === r.id)) )) as root}<label
                 >{root.label} / {l.reauth}<input type="password" bind:value={passwords[root.id]} autocomplete="off" /></label
@@ -160,7 +212,10 @@
             ><input type="checkbox" bind:checked={broadcastApproved} />{l.broadcastCheck}</label
         ><button
             class="primary"
-            disabled={busy || !broadcastApproved || !password || !snapshotView.settings?.rpcUrl}
+            disabled={busy ||
+                !broadcastApproved ||
+                !password ||
+                !(snapshotView.settings?.providers?.[review.inspection.network] || snapshotView.settings?.rpcUrl)}
             onclick={() => void broadcast()}>{l.broadcast}</button
         >
     {/if}

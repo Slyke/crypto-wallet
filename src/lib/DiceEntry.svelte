@@ -77,13 +77,20 @@
                 <summary>{l.calculated}</summary>
                 <pre>{worksheet({ entry: preview })}</pre>
             </details>
-            <button class="primary" {disabled} onclick={accept}>{l.acceptWord}</button>
+            <div class="dice-accept"><button class="primary" {disabled} onclick={accept}>{l.acceptWord}</button></div>
         {/if}
-        {#if !raw}<details>
-                <summary>{l.alreadyGenerated}</summary><label
-                    >{l.englishWord}<input bind:value={inputWord} autocomplete="off" spellcheck="false" maxlength="16" /></label
-                ><button disabled={disabled || !inputWord} onclick={acceptManual}>{l.addWord}</button>
-            </details>{/if}
+        {#if !raw}<div class="dice-alternative">
+                <details>
+                    <summary>{l.alreadyGenerated}</summary><label
+                        >{l.englishWord}<input
+                            bind:value={inputWord}
+                            autocomplete="off"
+                            spellcheck="false"
+                            maxlength="16"
+                        /></label
+                    ><button disabled={disabled || !inputWord} onclick={acceptManual}>{l.addWord}</button>
+                </details>
+            </div>{/if}
     {/if}
     {#if !raw && entries.length}<button {disabled} onclick={previous}>{l.editLastWord}</button>{/if}
     {#if error}<div role="alert" class="alert danger">{error}</div>{/if}

@@ -1,9 +1,16 @@
 <script lang="ts">
-    import { untrack } from 'svelte';
-    import { applyAppearance, readAppearance, palettes } from './appearance';
+    import { untrack, onMount } from 'svelte';
+    import { applyAppearance, currentAppearance, palettes } from './appearance';
     import { l } from './i18n';
-    let appearance = $state(untrack(readAppearance));
+    let appearance = $state(untrack(currentAppearance));
     const apply = () => applyAppearance({ appearance });
+    onMount(() => {
+        const update = () => {
+            appearance = currentAppearance();
+        };
+        window.addEventListener('airvault-appearance', update);
+        return () => window.removeEventListener('airvault-appearance', update);
+    });
 </script>
 
 <div class="theme-controls">
@@ -24,5 +31,11 @@
             ></select
         ></label
     >
+    <label
+        >{l.scale}<select bind:value={appearance.scale} onchange={apply}
+            >{#each [70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180] as scale}<option value={scale}>{scale}%</option
+                >{/each}</select
+        ></label
+    >
 </div>
-<small role="status">{l[appearance.palette]} / {l[appearance.theme]}</small>
+<small role="status">{l[appearance.palette]} / {l[appearance.theme]} / {appearance.scale}% · Ctrl + / − · Ctrl 0</small>

@@ -1,27 +1,57 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, setContext } from 'svelte';
+    import { helpContext, pageTopics, type HelpNavigation } from './lib/help';
     import { open, save } from '@tauri-apps/plugin-dialog';
-    import { call, emptySnapshot, errorText, type Snapshot, type Mode, type Review, type Capability } from './lib/api';
+    import {
+        call,
+        emptySnapshot,
+        errorText,
+        type Snapshot,
+        type Mode,
+        type Review,
+        type Capability,
+        type Network,
+    } from './lib/api';
     import { l } from './lib/i18n';
     import Wallets from './lib/Wallets.svelte';
     import Accounts from './lib/Accounts.svelte';
+    import Multisig from './lib/Multisig.svelte';
     import Transfer from './lib/Transfer.svelte';
     import RequestReview from './lib/RequestReview.svelte';
     import Help from './lib/Help.svelte';
+    import About from './lib/About.svelte';
     import Appearance from './lib/Appearance.svelte';
+    import PasswordStrength from './lib/PasswordStrength.svelte';
+    import PasswordMatch from './lib/PasswordMatch.svelte';
+    import Info from './lib/Info.svelte';
+    import { scaleShortcut } from './lib/appearance';
     import SettingsView from './lib/Settings.svelte';
     let snapshotView = $state<Snapshot>(emptySnapshot);
     let page = $state('overview');
+    let helpTopic = $state('start');
+    setContext<HelpNavigation>(helpContext, {
+        available: () => snapshotView.unlocked,
+        open: (topic) => {
+            helpTopic = topic;
+            review = null;
+            page = 'help';
+            error = '';
+            notice = '';
+        },
+    });
     let busy = $state(false);
     let error = $state('');
     let notice = $state('');
     let ready = $state(false);
+    let showAbout = $state(false);
+    let aboutDialog: HTMLDialogElement;
     let password = $state('');
     let passwordConfirm = $state('');
     let mode = $state<Mode>('offline');
     let review = $state<Review | null>(null);
     let registry = $state<Capability[]>([]);
     let dryRun = $state(true);
+    let psbtNetwork = $state<Network>('bitcoin');
     let lastActivity = 0;
     let wasUnlocked = false;
     const refresh = async () => {
@@ -79,10 +109,10 @@
             },
             success: l.imported,
         });
-    const exportFile = ({ kind, id }: { kind: 'public' | 'request' | 'response'; id?: string }) =>
+    const exportFile = ({ kind, id }: { kind: 'public' | 'request' | 'response' | 'psbt'; id?: string }) =>
         run({
             action: async () => {
-                const ext = { public: 'avpub', request: 'avreq', response: 'avsig' }[kind];
+                const ext = { public: 'avpub', request: 'avreq', response: 'avsig', psbt: 'psbt' }[kind];
                 const path = await save({
                     defaultPath: `airvault-${id ?? 'accounts'}.${ext}`,
                     filters: [{ name: 'AirVault', extensions: [ext] }],
@@ -90,6 +120,14 @@
                 if (path) await call({ command: `export_${kind}`, args: { path, id } });
             },
             success: l.exportDone,
+        });
+    const importPsbt = () =>
+        run({
+            action: async () => {
+                const path = await open({ multiple: false, filters: [{ name: l.multiPsbt, extensions: ['psbt'] }] });
+                if (typeof path === 'string') await call({ command: 'import_psbt', args: { path, network: psbtNetwork } });
+            },
+            success: l.imported,
         });
     const openReview = ({ id }: { id: string }) =>
         run({
@@ -128,10 +166,30 @@
         }, 2000);
         return () => clearInterval(timer);
     });
-    const navigation = ['overview', 'wallets', 'accounts', 'transfer', 'requests', 'history', 'networks', 'settings', 'help'];
+    const navigation = [
+        'overview',
+        'createWallet',
+        'wallets',
+        'passphrases',
+        'accounts',
+        'multisig',
+        'transfer',
+        'requests',
+        'history',
+        'networks',
+        'settings',
+        'help',
+        'about',
+    ];
 </script>
 
-<svelte:window onpointerdown={markActivity} onkeydown={markActivity} />
+<svelte:window
+    onpointerdown={markActivity}
+    onkeydown={(event) => {
+        markActivity();
+        scaleShortcut({ event });
+    }}
+/>
 {#if !snapshotView.unlocked}
     <main class="gate">
         <div class="gate-brand">
@@ -143,8 +201,10 @@
         </div>
         <details><summary>{l.appearance}</summary><Appearance /></details>
         <div class="gate-card">
-            <div class="eyebrow">{l.preview}</div>
-            <h2>{snapshotView.initialized ? l.startup : l.setup}</h2>
+            <div class="heading-with-help">
+                <h2>{snapshotView.initialized ? l.startup : l.setup}</h2>
+                <Info title={l.secureVault}><p>{l.secureVaultHelp}</p></Info>
+            </div>
             <p class="muted">{snapshotView.initialized ? l.passwordHelp : l.setupHint}</p>
             {#if error}<div class="alert danger" role="alert">{error}</div>{/if}
             {#if notice}<div class="alert mid" role="status">{notice}</div>{/if}
@@ -154,67 +214,63 @@
                     void authenticate();
                 }}
             >
-                {#if !snapshotView.initialized}<div class="mode-options">
-                        {#each ['offline', 'proxy', 'combined'] as item}
-                            <label class:selected={mode === item} class="mode-choice"
-                                ><input
-                                    type="radio"
-                                    name="mode"
-                                    value={item}
-                                    bind:group={mode}
-                                    disabled={!snapshotView.networkBuild && item !== 'offline'}
-                                /><span><strong>{l[item]}</strong><small>{l[item + 'Help']}</small></span></label
-                            >
-                        {/each}
-                    </div>{/if}
                 <label
                     >{l.password}<input
                         type="password"
                         bind:value={password}
                         autocomplete="off"
                         required
-                        minlength={snapshotView.initialized ? 1 : 12}
+                        minlength={snapshotView.initialized ? 1 : 6}
                         maxlength="1024"
                     /></label
                 >
-                {#if !snapshotView.initialized}<label
+                {#if !snapshotView.initialized}<PasswordStrength {password} /><label
                         >{l.passwordConfirm}<input
                             type="password"
                             bind:value={passwordConfirm}
                             autocomplete="off"
                             required
-                            minlength="12"
+                            minlength="6"
                             maxlength="1024"
                         /></label
-                    >{/if}
+                    ><PasswordMatch {password} confirmation={passwordConfirm} />{/if}
                 <button class="primary wide" disabled={busy || !ready}
                     >{busy ? l.working : snapshotView.initialized ? l.unlock : l.create}</button
                 >
             </form>
-            <details>
-                <summary>{l.restore}</summary>
-                <p>{l.restoreHelp}</p>
-                <label class="check"><input type="checkbox" bind:checked={dryRun} />{l.dryRun}</label><button
-                    disabled={busy || !password}
-                    onclick={() => void restore()}>{l.restoreAction}</button
-                >
-            </details>
+            {#if !snapshotView.initialized}<details>
+                    <summary>{l.restore}</summary>
+                    <div class="heading-with-help">
+                        <h3>{l.restoreAction}</h3>
+                        <Info title={l.restore}><p>{l.restoreHelp}</p></Info>
+                    </div>
+                    <label class="check"><input type="checkbox" bind:checked={dryRun} />{l.dryRun}</label><button
+                        disabled={busy || !password}
+                        onclick={() => void restore()}>{l.restoreAction}</button
+                    >
+                </details>{/if}
         </div>
-        <details><summary>{l.help}</summary><Help /></details>
-        <p class="footnote">{l.testing}</p>
+        <div class="gate-footer">
+            <span>{snapshotView.initialized ? l.encrypted : l.offline}</span><button
+                onclick={() => {
+                    showAbout = true;
+                    aboutDialog.showModal();
+                }}>{l.about}</button
+            >
+        </div>
     </main>
 {:else}
     <div class="app-shell">
         <aside>
             <div class="brand">
                 <span class="logo">AV</span>
-                <div><strong>{l.title}</strong><small>0.1.0 · preview</small></div>
+                <div><strong>{l.title}</strong><small>0.1.0</small></div>
             </div>
             <div class="vault-state">
                 <span class="status-dot"></span>{l.unlocked}<small>{l[snapshotView.settings?.mode ?? 'offline']}</small>
             </div>
             <nav aria-label={l.tools}>
-                {#each navigation as item}{#if !(item === 'wallets' && snapshotView.settings?.mode === 'proxy') && !(item === 'transfer' && snapshotView.settings?.mode === 'offline')}
+                {#each navigation as item}{#if !(['createWallet', 'wallets', 'passphrases'].includes(item) && snapshotView.settings?.mode === 'proxy') && !(item === 'transfer' && snapshotView.settings?.mode === 'offline')}
                         <button
                             class:active={page === item}
                             onclick={() => {
@@ -226,9 +282,7 @@
                     {/if}{/each}
             </nav>
             <div class="sidebar-bottom">
-                <small>{l.bytesInfo}</small><button onclick={() => void run({ action: () => call({ command: 'lock_vault' }) })}
-                    >{l.lock}</button
-                >
+                <button onclick={() => void run({ action: () => call({ command: 'lock_vault' }) })}>{l.lock}</button>
             </div>
         </aside>
         <div class="workspace">
@@ -244,21 +298,18 @@
                 <div class="page-title">
                     <div>
                         <div class="eyebrow">{l.title.toUpperCase()} / {l[page].toUpperCase()}</div>
-                        <h1>{l[page]}</h1>
+                        <div class="heading-with-help">
+                            <h1>{l[page]}</h1>
+                            <Info title={l[page]} topic={page === 'help' ? undefined : pageTopics[page]}
+                                ><p>{l['page_' + page]}</p></Info
+                            >
+                        </div>
                     </div>
-                    <span class="badge neutral">{l.preview}</span>
                 </div>
                 {#if error}<div class="alert danger" role="alert">{error}</div>{/if}
                 {#if notice}<div class="alert mid" role="status">{notice}</div>{/if}
                 {#if busy}<div class="working" role="status">{l.working}</div>{/if}
                 {#if page === 'overview'}
-                    <div class="alert" class:warning={snapshotView.settings?.mode === 'combined'}>
-                        {snapshotView.settings?.mode === 'combined'
-                            ? l.combinedNote
-                            : snapshotView.settings?.mode === 'offline'
-                              ? l.offlineNote
-                              : l.proxyHelp}
-                    </div>
                     <div class="stats">
                         <article>
                             <small>{l.walletCount}</small><strong>{snapshotView.roots.length.toString().padStart(2, '0')}</strong>
@@ -279,8 +330,12 @@
                         <div class="three-columns">
                             {#each [1, 2, 3] as step}<article class="step">
                                     <span class="step-number">0{step}</span>
-                                    <h3>{l['step' + step]}</h3>
-                                    <p>{l['step' + step + 'Help']}</p>
+                                    <div class="heading-with-help">
+                                        <h3>{l['step' + step]}</h3>
+                                        <Info title={l['step' + step]} topic={step === 1 ? 'recovery' : 'signing'}
+                                            ><p>{l['step' + step + 'Help']}</p></Info
+                                        >
+                                    </div>
                                 </article>{/each}
                         </div>
                     </section>
@@ -294,15 +349,22 @@
                                     >
                                 </div>{/each}{/if}
                     </section>
-                    <p class="footnote">{l.testing}</p>
-                {:else if page === 'wallets'}<Wallets {snapshotView} {busy} {run} />
+                {:else if ['createWallet', 'wallets', 'passphrases'].includes(page)}{#key page}<Wallets
+                            view={page}
+                            {snapshotView}
+                            {busy}
+                            {run}
+                        />{/key}
+                {:else if page === 'multisig'}<Multisig {snapshotView} {busy} {run} />
                 {:else if page === 'accounts'}<Accounts
+                        {registry}
                         {snapshotView}
                         {busy}
                         {run}
                         onexport={() => void exportFile({ kind: 'public' })}
                     />
                 {:else if page === 'transfer'}<Transfer
+                        {registry}
                         {snapshotView}
                         {busy}
                         {run}
@@ -311,8 +373,27 @@
                         }}
                     />
                 {:else if page === 'requests'}
-                    <p>{l.bytesInfo}</p>
-                    {#if snapshotView.pending.length === 0}<section class="empty">{l.emptyRequests}</section>{/if}
+                    <section>
+                        <div class="heading-with-help">
+                            <h2>{l.multiPsbt}</h2>
+                            <Info title={l.multiPsbt} topic="multisigSigning"><p>{l.multiPsbtHelp}</p></Info>
+                        </div>
+                        <div class="actions">
+                            <label
+                                >{l.network}<select bind:value={psbtNetwork}
+                                    >{#each ['bitcoin', 'testnet', 'testnet4', 'signet', 'regtest'] as network}<option
+                                            value={network}>{network}</option
+                                        >{/each}</select
+                                ></label
+                            >
+                            <button disabled={busy} onclick={() => void importPsbt()}>{l.multiImportPsbt}</button>
+                        </div>
+                    </section>
+
+                    {#if snapshotView.pending.length === 0}<section class="empty">
+                            <p>{l.emptyRequests}</p>
+                            <button disabled={busy} onclick={() => void importFile()}>{l.import}</button>
+                        </section>{/if}
                     {#each snapshotView.pending as request}
                         {@const response = snapshotView.responses.find((r) => r.requestId === request.requestId)}
                         <section>
@@ -329,7 +410,11 @@
                                 ><button
                                     onclick={() => void exportFile({ kind: 'request', id: request.requestId })}
                                     disabled={busy}>{l.exportRequest}</button
-                                >{#if response}<button
+                                >{#if ['bitcoin', 'testnet', 'testnet4', 'signet', 'regtest'].includes(request.network)}<button
+                                        onclick={() => void exportFile({ kind: 'psbt', id: request.requestId })}
+                                        disabled={busy}>{l.multiExportPsbt}</button
+                                    >{/if}
+                                {#if response}<button
                                         onclick={() => void exportFile({ kind: 'response', id: request.requestId })}
                                         disabled={busy}>{l.exportResponse}</button
                                     >{/if}
@@ -352,28 +437,24 @@
                                 </article>{/each}{/if}
                     </section>
                 {:else if page === 'networks'}
-                    <p>{l.supportHelp}</p>
-                    <section class="table-wrap">
-                        <table>
-                            <thead
-                                ><tr><th>{l.network}</th><th>{l.derivation}</th><th>{l.signing}</th><th>{l.messages}</th></tr
-                                ></thead
-                            ><tbody
-                                >{#each registry as item}<tr
-                                        ><td><strong>{item.network}</strong><small>{item.note}</small></td><td
-                                            >{item.derivation}</td
-                                        ><td>{item.signing}</td><td>{item.messages}</td></tr
-                                    >{/each}</tbody
-                            >
-                        </table>
-                    </section>
+                    <div class="three-columns chain-list">
+                        {#each registry.filter((c) => !['testnet', 'testnet4', 'signet', 'regtest', 'sepolia', 'solana_devnet', 'cardano_preprod', 'tron_nile'].includes(c.network)) as item}
+                            <section>
+                                <h2>{item.name}</h2>
+                                <span class="badge">{item.symbol}</span>{#if item.tokens}<span class="badge neutral"
+                                        >{item.tokens}</span
+                                    >{/if}
+                            </section>
+                        {/each}
+                    </div>
                 {:else if page === 'settings'}
-                    <SettingsView {snapshotView} {busy} {run} />
+                    <SettingsView {registry} {snapshotView} {busy} {run} />
                     <section>
                         <h2>{l.appearance}</h2>
                         <Appearance />
                     </section>
-                {:else if page === 'help'}<Help />
+                {:else if page === 'help'}<Help bind:topic={helpTopic} />
+                {:else if page === 'about'}<About />
                 {/if}
             </main>
         </div>
@@ -389,3 +470,18 @@
             review = null;
         }}
     />{/if}
+
+<dialog
+    bind:this={aboutDialog}
+    aria-labelledby="gate-about-title"
+    class="about-dialog"
+    onclose={() => {
+        showAbout = false;
+    }}
+>
+    <div class="dialog-heading">
+        <h2 id="gate-about-title">{l.about}</h2>
+        <button onclick={() => aboutDialog.close()}>{l.dismiss}</button>
+    </div>
+    {#if showAbout}<About />{/if}
+</dialog>

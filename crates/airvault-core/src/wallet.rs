@@ -57,6 +57,9 @@ impl OpenVault {
         if !self.data.settings.mode.can_sign() {
             return Err(Error::Mode);
         }
+        if !network.is_bitcoin() {
+            return Err(Error::Invalid("Bitcoin WIF network"));
+        }
         let key = PrivateKey::from_wif(wif).map_err(|_| Error::Invalid("invalid Bitcoin WIF"))?;
         if !key.compressed || key.network != network.native().into() {
             return Err(Error::Invalid("WIF network or compression mismatch"));
@@ -137,9 +140,14 @@ impl OpenVault {
         if !self.data.settings.mode.can_sign() {
             return Err(Error::Mode);
         }
+        if path.starts_with("m/48'") {
+            return Err(Error::Invalid(
+                "register a BIP48 account through Bitcoin multisig",
+            ));
+        }
         let label = model::label(label)?;
-        let (private, fingerprint) = self.derive_secret(identity_id, network, path, password)?;
-        let (address, public_key) = public_account(&private, network, path)?;
+        let (private, fingerprint) = self.derive_material(identity_id, network, path, password)?;
+        let (address, public_key) = crate::chains::keys::public_account(&private, network, path)?;
         if self
             .data
             .accounts
@@ -150,6 +158,7 @@ impl OpenVault {
         }
         let id = Uuid::new_v4();
         self.data.accounts.push(Account {
+            multisig: None,
             id,
             identity_id: Some(identity_id),
             label,
@@ -159,6 +168,7 @@ impl OpenVault {
             public_key,
             fingerprint,
             watch_only: false,
+            tokens: vec![],
         });
         Ok(id)
     }
@@ -219,6 +229,67 @@ impl OpenVault {
         child.private_key.non_secure_erase();
         Ok((result, fingerprint))
     }
+    pub(crate) fn derive_material(
+        &self,
+        identity_id: Uuid,
+        network: Network,
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<(Zeroizing<Vec<u8>>, String)> {
+        if network.is_bitcoin() {
+            let (key, fingerprint) = self.derive_secret(identity_id, network, path, password)?;
+            return Ok((Zeroizing::new(key.to_vec()), fingerprint));
+        }
+        let identity = self
+            .data
+            .identities
+            .iter()
+            .find(|i| i.id == identity_id)
+            .ok_or(Error::NotFound)?;
+        let root = self
+            .data
+            .roots
+            .iter()
+            .find(|r| r.id == identity.root_id && r.kind == "bip39")
+            .ok_or(Error::Invalid("this key is not a recovery phrase"))?;
+        let phrase = self.decrypt_record(root.id, password)?;
+        let mnemonic =
+            Mnemonic::parse(std::str::from_utf8(&phrase).map_err(|_| Error::Authentication)?)
+                .map_err(|_| Error::Authentication)?;
+        let passphrase = match identity.passphrase_record {
+            Some(id) => self.decrypt_record(id, password)?,
+            None => Zeroizing::new(vec![]),
+        };
+        crate::chains::keys::derive(
+            &mnemonic,
+            std::str::from_utf8(&passphrase).map_err(|_| Error::Authentication)?,
+            network,
+            path,
+        )
+    }
+    pub fn add_token(&mut self, account_id: Uuid, token: crate::model::Token) -> Result<()> {
+        let account = self
+            .data
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == account_id)
+            .ok_or(Error::NotFound)?;
+        token.validate(account.network)?;
+        if account.tokens.len() >= 100 {
+            return Err(Error::Invalid("token limit"));
+        }
+        if account.tokens.iter().any(|t| {
+            if account.network.evm_id().is_some() {
+                t.contract.eq_ignore_ascii_case(&token.contract)
+            } else {
+                t.contract == token.contract
+            }
+        }) {
+            return Err(Error::Duplicate);
+        }
+        account.tokens.push(token);
+        Ok(())
+    }
     pub fn verify_recovery(
         &self,
         root_id: Uuid,
@@ -244,6 +315,24 @@ impl OpenVault {
     }
 }
 pub fn validate_path(path: &str, network: Network) -> Result<()> {
+    if path.starts_with("m/48'") {
+        let parts: Vec<_> = path.rsplitn(3, '/').collect();
+        if parts.len() != 3 {
+            return Err(Error::Invalid("BIP48 address path"));
+        }
+        crate::multisig::validate_origin(parts[2], network)?;
+        let branch: u32 = parts[1]
+            .parse()
+            .map_err(|_| Error::Invalid("BIP48 branch"))?;
+        let index: u32 = parts[0]
+            .parse()
+            .map_err(|_| Error::Invalid("BIP48 address index"))?;
+        if branch > 1 || index >= (1 << 31) {
+            return Err(Error::Invalid("BIP48 address index"));
+        }
+        return Ok(());
+    }
+
     let parts: Vec<_> = path.split('/').collect();
     let coin = if network == Network::Bitcoin {
         "0'"

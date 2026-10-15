@@ -1,62 +1,58 @@
-# AirVault — Windows testing preview
+# AirVault
 
-A Tauri 2 / Svelte 5 / Rust desktop vault with a working Bitcoin native SegWit file-signing workflow. This is the first Bitcoin testing milestone of the supplied specification, **not the completed multi-chain product**.
+A Windows desktop vault for local keys, offline signing, and watch-only transfers. Built with Tauri, Svelte and Rust.
 
 ## Run on Windows
 
-Build outputs are in `artifacts/windows/`:
+Extract **AirVault_0.1.0_windows-x64-portable.zip** and open **AirVault.exe**. Keep **WebView2Loader.dll** beside it. Alternatively use **AirVault_0.1.0_x64-setup.exe**. There is one application: it starts Offline and lets you choose Online or Proxy in Settings.
 
-- `AirVault_0.1.0_windows-x64-portable.zip`: recommended portable package; extract the entire ZIP.
-- `WebView2Loader.dll`: must stay beside both executables.
-- `AirVault.exe`: portable Windows x64 application, with Offline, Proxy and Combined modes.
-- `AirVault-offline.exe`: portable signer build with the blockchain networking dependency and commands excluded at compile time.
-- `AirVault_0.1.0_x64-setup.exe`: current-user installer for the normal application.
-- `SHA256SUMS.txt`: hashes of these files.
+Windows 10/11 x64 and Microsoft Edge WebView2 Runtime are required. The installer does not download the runtime, so install WebView2 before moving to an offline machine. The application and installer are currently unsigned.
 
-Windows 10/11 x64 with Microsoft Edge WebView2 Runtime is required. The installer deliberately does not download a runtime: prepare WebView2 before moving the app to an offline machine. These initial binaries are unsigned.
+Create a vault password of at least six characters. The strength meter is advisory. Create or import a recovery phrase under **Create or import**, then choose a blockchain under Accounts. Add tokens to their blockchain account when creating it or later with **Include a token**. SHIB is an Ethereum ERC-20 token.
 
-Start with a disposable wallet. The application has **Basic instructions** and **Advanced instructions**, available before unlocking and from the Instructions page. Appearance offers D4rk, Terminal, Paper and Ocean, each in dark or light mode.
+Appearance includes D4rk, Terminal, Paper and Ocean, light/dark modes, fonts and 70–180% interface scale. Ctrl+/Ctrl− changes scale; Ctrl0 restores 100%. Basic and advanced instructions are on the Instructions page. Contextual explanations open through the small information buttons.
 
-By default, the vault is stored under the Tauri application data directory for `app.airvault.desktop` (normally `%APPDATA%\\app.airvault.desktop`). Supply a separate profile for each test role:
+The default profile is in the Tauri application data directory for `app.airvault.desktop`. A separate profile can be selected with:
 
 ```powershell
-.\\AirVault.exe --data-dir C:\\AirVaultTests\\signer
-.\\AirVault.exe --data-dir C:\\AirVaultTests\\proxy
-.\\AirVault-offline.exe --data-dir C:\\AirVaultTests\\offline
+.\AirVault.exe --data-dir C:\AirVault\signer
 ```
 
-An exclusive profile lock prevents two app instances from modifying the same vault. The vault password is required on every startup. Backups restore into a fresh profile and support a read-only integrity check first.
+An existing profile is opened rather than overwritten. Restore is available on the creation screen of a fresh profile.
 
-## Current functionality
+## Blockchains and assets
 
-- Encrypted multiple BIP39 roots, BIP39 passphrase identities, compressed Bitcoin WIF import and independently password-protected roots.
-- AES-256-GCM records and metadata, per-record random encryption keys, Argon2id master/password wrapping, atomic saves, portable encrypted backups.
-- 12/24-word generation with exact manual-prefix bit preservation, OS randomness, or 128/256 raw entropy bits.
-- Guided physical dice entry, undo/reset, complete selectable calculations, per-word verification, a bundled 2,048-word reference and independent verification instructions.
-- BIP44/49/84/86 address derivation. Signing currently supports **single-key P2WPKH PSBTs with SIGHASH_ALL**.
-- Bitcoin mainnet, Testnet3, Testnet4, signet and regtest network identities. Testnet4 is the default derivation choice.
-- `.avpub` public accounts, `.avreq` requests, `.avsig` verified signed responses and `.avvault` encrypted backups.
-- Payload-derived transaction review, key/address matching, expiring single-use approval, independent signature verification and explicit broadcast authorization.
-- Explicit Esplora queries in Proxy/Combined mode. Provider genesis identity, full previous transactions, returned txids and UTXO ownership are checked.
-- Startup/inactivity/focus locking, native Windows suspend/resume notifications, and a separate network-free build.
+Bitcoin, Ethereum, Dogecoin, Solana, Polkadot Hub, Litecoin, Bitcoin Cash, BNB Smart Chain, Polygon, Avalanche C-Chain, Arbitrum, Optimism, Base, Cardano, Cosmos Hub, XRP Ledger and Tron have account derivation and native transfer signing. Additional networks include Bitcoin Testnet/Testnet4/Signet/Regtest, Ethereum Sepolia, Solana Devnet, Cardano Preprod and Tron Nile.
 
-See [implementation status](./docs/implementation-status.md) for incomplete specification items, [security boundaries](./SECURITY.md), [architecture](./docs/architecture.md), and [Windows test instructions](./docs/testing.md).
+Token transfers cover ERC-20, SPL and TRC-20. The EVM transfer form also handles ERC-721 and ERC-1155 transfers. Cosmos supports delegation, undelegation and reward claims. See [capability details](docs/implementation-status.md) for exact transaction formats and remaining scope.
+
+Online and Proxy modes need a provider URL for each network. No provider is contacted automatically. **Load network data** fills transaction counters, block references and available inputs. Review all transaction fields before signing or broadcasting.
+
+For separate computers, export public accounts as `.avpub` to the Proxy profile. Prepare an `.avreq`, sign it on the Offline profile, and return the verified `.avsig` for explicit broadcast approval. Private keys remain on the signer.
 
 ## Development
 
-Requirements: Node 24, Rust, a C/C++ toolchain and the Tauri platform prerequisites. Dependencies are locked in `Cargo.lock` and `package-lock.json`; Trust Wallet Core is pinned to a commit.
+Node 24, Rust, a C/C++ toolchain and Tauri prerequisites are required. Dependencies are locked; Wallet Core is pinned to commit `d40d24a63d92619167903369308bf0e2f7eb3a59`.
 
 ```bash
 npm ci
 npm run check
 npm test
-cargo test -p airvault-core
+cargo test -p airvault-core --release
 npm run test:ui
 npm run tauri -- dev
 ```
 
-The browser UI tests use a separate Vite entry and a Rust example process. They exercise actual vault encryption and signing in disposable directories. No debug route, mock IPC, test command or automation entry is imported into the production app. `npm run check:production` scans the built assets; the Windows build script also scans both executables.
+From WSL, `bash scripts/build-windows.sh` builds one Windows application, the installer and portable ZIP. It requires the Windows GNU Rust target, MinGW and NSIS. See [build and test instructions](docs/testing.md).
 
-Cross-building Windows from this WSL checkout uses `bash scripts/build-windows.sh`, the Rust Windows GNU target, MinGW and a local NSIS installation. On a configured native Windows build host, `npm run tauri -- build` uses the normal Tauri build workflow. See [testing/build notes](./docs/testing.md) for offline and cross-build details.
+The UI test harness is a separate Vite entry and native Cargo example, absent from the production application. The release scanner checks both assets and executable for test entry points.
 
-Linux desktop packaging and VM testing remain pending, as requested. Core tests and the isolated browser tests run in WSL; that is not a claim of Linux desktop qualification.
+See [security boundaries](SECURITY.md), [architecture](docs/architecture.md), [signing engines](docs/engine-investigation.md), and [validation](docs/validation.md). Windows is the current desktop target; Linux packaging and VM testing remain pending.
+
+Wallet management is split into **Create or import**, **Wallets & recovery**, and **Passphrases**. Recovery entry accepts complete English words or unique four-letter prefixes, separated by spaces or lines. Numbered entries require one word per line in sequence. Failed import, verification and creation confirmation retain the input for correction. Creation confirmation can retry until its five-minute deadline. Copy seed phrase asks for confirmation and writes a numbered list to the clipboard.
+
+Help buttons sit beside their headings and labels. Click outside a help dialog, press Escape or use Close to dismiss it. **Learn more** opens the relevant offline Instructions topic, with basic and advanced explanations. Accounts can be deleted with confirmation; the wallet, identities, history and blockchain funds remain intact.
+
+## Bitcoin multisig
+
+Open **Bitcoin multisig** for 2-of-3 or a custom threshold. Exchange public cosigner keys, verify the shared configuration, then use PSBT files in **Signing requests** to collect signatures. Keep each signer independent. Save the complete configuration for every cosigner and separate recovery phrases/passphrases; phrases alone are not a complete multisig backup. The offline wiki has Basic and Advanced setup, signing, recovery and risks articles. See [the multisig guide](docs/multisig.md).
